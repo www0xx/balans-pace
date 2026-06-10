@@ -1,0 +1,1677 @@
+#include <cinttypes>
+#include <iomanip>
+#include <sstream>
+#include <functional>
+
+#include "esphome/core/log.h"
+#include "pace_bms_component_master.h"
+
+namespace esphome {
+namespace pace_bms_master {
+
+static const char* const TAG = "pace_bms_master";
+
+// for the protocol implementation dependency injection only
+static const char* const TAG_PROTOCOL = "pace_bms_protocol";
+
+/*
+* dependency injection to the protocol implementation
+*/
+
+void error_log_func(std::string message) {
+	ESP_LOGE(TAG_PROTOCOL, "%s", message.c_str());
+}
+void warning_log_func(std::string message) {
+	ESP_LOGW(TAG_PROTOCOL, "%s", message.c_str());
+}
+void info_log_func(std::string message) {
+	ESP_LOGI(TAG_PROTOCOL, "%s", message.c_str());
+}
+void debug_log_func(std::string message) {
+	ESP_LOGD(TAG_PROTOCOL, "%s", message.c_str());
+}
+void verbose_log_func(std::string message) {
+	ESP_LOGV(TAG_PROTOCOL, "%s", message.c_str());
+}
+void very_verbose_log_func(std::string message) {
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERY_VERBOSE
+	ESP_LOGVV(TAG_PROTOCOL, "%s", message.c_str());
+#endif
+}
+
+/*
+* log configuration
+*/
+
+// helpers for printing the enums
+static const char * SlaveDiscoveryModeStrings[] = { "NONE", "RELAY", "BROADCAST", "RELAY_AND_BROADCAST" };
+const char * to_cstring(SlaveDiscoveryMode mode) { return SlaveDiscoveryModeStrings[mode]; }
+static const char * SlaveQueryModeStrings[] = { "BROADCAST", "RELAY" };
+const char * to_cstring(SlaveQueryMode mode) { return SlaveQueryModeStrings[mode]; }
+
+void PaceBmsMaster::dump_config() {
+	ESP_LOGCONFIG(TAG, "pace_bms_master:");
+	ESP_LOGCONFIG(TAG, "  yaml id: %s", this->get_id_name().c_str());
+	ESP_LOGCONFIG(TAG, "  Address: %i", this->address_);
+	if(this->responding_address_.has_value())
+		ESP_LOGCONFIG(TAG, "  RespondingAddress: %i", this->responding_address_.value());
+
+	LOG_PIN("  Flow Control Pin: ", this->flow_control_pin_);
+
+	ESP_LOGCONFIG(TAG, "  ProtocolCommandSet: 0x%02X", this->protocol_commandset_);
+	if(this->protocol_variant_.has_value())
+		ESP_LOGCONFIG(TAG, "  ProtocolVariant: %s", this->protocol_variant_.value().c_str());
+	if(this->protocol_version_.has_value())
+		ESP_LOGCONFIG(TAG, "  Protocol Version: 0x%02X", this->protocol_version_.value());
+	if(this->chemistry_.has_value())
+		ESP_LOGCONFIG(TAG, "  Chemistry: 0x%02X", this->chemistry_.value());
+
+	ESP_LOGCONFIG(TAG, "  Request Throttle (ms): %i", this->request_throttle_);
+	ESP_LOGCONFIG(TAG, "  Response Timeout (ms): %i", this->response_timeout_);
+
+	ESP_LOGCONFIG(TAG, "  Slave Discovery Mode: %s", to_cstring(this->slave_discovery_mode_));
+	ESP_LOGCONFIG(TAG, "  Slave Query Mode: %s", to_cstring(this->slave_query_mode_));
+
+	ESP_LOGCONFIG(TAG, "  Rx Buffer Size: %i", this->rx_buffer_size_);
+	ESP_LOGCONFIG(TAG, "  Update Interval: %i", this->update_interval_);
+
+	// print an error if the settings do not match
+	this->check_uart_settings(9600, /*require_rx=True, require_tx=True,*/ 1, uart::UART_CONFIG_PARITY_NONE, 8);
+}
+
+/*
+* setup this component
+*/
+
+void PaceBmsMaster::setup() {
+	this->raw_data_ = new uint8_t[this->rx_buffer_size_];
+	if(this->raw_data_ == nullptr) {
+		this->status_set_error();
+		ESP_LOGE(TAG, "Failed to allocate RX buffer of size %i bytes", (int)(this->rx_buffer_size_));
+		return;
+	}
+
+	if (this->protocol_commandset_ == 0x25) {
+		// the protocol en/decoder PaceBmsProtocolV25 is meant to be standalone with no dependencies, so inject esphome logging function wrappers on construction
+		this->pace_bms_v25_ = new PaceBmsProtocolV25(
+			protocol_variant_, protocol_version_, chemistry_,
+			error_log_func, warning_log_func, info_log_func, debug_log_func, verbose_log_func, very_verbose_log_func);
+	}
+	else if (this->protocol_commandset_ == 0x20) {
+		// the protocol en/decoder PaceBmsProtocolV25 is meant to be standalone with no dependencies, so inject esphome logging function wrappers on construction
+		this->pace_bms_v20_ = new PaceBmsProtocolV20(
+			protocol_variant_, protocol_version_, chemistry_,
+			error_log_func, warning_log_func, info_log_func, debug_log_func, verbose_log_func, very_verbose_log_func);
+	}
+	else {
+		this->status_set_error();
+		ESP_LOGE(TAG, "Protocol version 0x%02X is not supported", this->protocol_commandset_);
+		return;
+	}
+
+	if (this->flow_control_pin_ != nullptr)
+		this->flow_control_pin_->setup();
+
+	// clear uart buffer
+	uint8_t byte;
+	while (this->available() != 0) {
+		this->read_byte(&byte);
+	}
+
+	// currently no "setup" is done for 0x20 so there is no else block
+	if(this->protocol_commandset_ == 0x25) {
+		// always send the "Read BMS Count" command first thing, the value could be useful later even if the user doesn't request the sensor
+		if(this->get_bms_type() == pace_bms_base::BMS_TYPE_MASTER) {
+			command_item* item = new command_item;
+			item->description_ = std::string("read BMS count");
+			item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadBmsCountRequest(this->address_, request); };
+			item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_bms_count_response_v25(response); };
+			read_queue_.push(item);
+		}
+		// if slave discovery mode is enabled, queue the commands as the first thing that will be done, before the first update() call can queue anything else
+		if(this->slave_discovery_mode_ != SLAVE_DISCOVERY_MODE_NONE && this->get_bms_type() == pace_bms_base::BMS_TYPE_MASTER) {
+			// asking for analog info is always the first thing (here and also in update()) so that we can sniff the User Defined Value field to determine the protocol variant
+			if(this->slave_discovery_mode_ == SLAVE_DISCOVERY_MODE_BROADCAST || this->slave_discovery_mode_ == SLAVE_DISCOVERY_MODE_RELAY_AND_BROADCAST) {
+				command_item* item = new command_item;
+				item->description_ = std::string("slave discovery broadcast: query for analog information");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadAnalogInformationRequest(this->address_, 0xFF, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_slave_discovery_broadcast_read_analog_information_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if(this->slave_discovery_mode_ == SLAVE_DISCOVERY_MODE_BROADCAST || this->slave_discovery_mode_ == SLAVE_DISCOVERY_MODE_RELAY_AND_BROADCAST) {
+				command_item* item = new command_item;
+				item->description_ = std::string("slave discovery broadcast: query for status information");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadStatusInformationRequest(this->address_, 0xFF, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_slave_discovery_broadcast_read_status_information_response_v25(response); };
+				read_queue_.push(item);
+			}
+			// this (and the next if) is a lot of traffic, and the BMS tends to barf if you ask it for a non-existent address, but I'll leave it for debugging purposes
+			if(this->slave_discovery_mode_ == SLAVE_DISCOVERY_MODE_RELAY || this->slave_discovery_mode_ == SLAVE_DISCOVERY_MODE_RELAY_AND_BROADCAST) {
+				for(int slaveAddress = 0; slaveAddress < 16; slaveAddress++) { 
+					// don't query self
+					if(slaveAddress == this->address_) 
+						continue;
+					command_item* item = new command_item;
+					item->description_ = std::string("slave discovery relay: query slave address " + std::to_string(slaveAddress) + " for analog information");
+					item->create_request_frame_ = [this, slaveAddress](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadAnalogInformationRequest(this->address_, slaveAddress, request); };
+					item->process_response_frame_ = [this, slaveAddress](std::span<uint8_t>& response) -> void { this->handle_slave_discovery_relay_read_analog_information_response_v25(slaveAddress, response); };
+					read_queue_.push(item);
+				}
+			}
+			if(this->slave_discovery_mode_ == SLAVE_DISCOVERY_MODE_RELAY || this->slave_discovery_mode_ == SLAVE_DISCOVERY_MODE_RELAY_AND_BROADCAST) {
+				for(int slaveAddress = 0; slaveAddress < 16; slaveAddress++) { 
+					// don't query self
+					if(slaveAddress == this->address_) 
+						continue;
+					command_item* item = new command_item;
+					item->description_ = std::string("slave discovery relay: query slave address " + std::to_string(slaveAddress) + " for status information");
+					item->create_request_frame_ = [this, slaveAddress](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadStatusInformationRequest(this->address_, slaveAddress, request); };
+					item->process_response_frame_ = [this, slaveAddress](std::span<uint8_t>& response) -> void { this->handle_slave_discovery_relay_read_status_information_response_v25(slaveAddress, response); };
+					read_queue_.push(item);
+				}
+			}
+		}
+	}
+	ESP_LOGV(TAG, "Read commands queued in setup: %i", (int)(read_queue_.size()));
+}
+
+/*
+* fill read_queue_ with any necessary BMS commands to update sensor values, based on what was subscribed for by child sensors
+* instances via setting callbacks to receive the updates
+*/
+
+void PaceBmsMaster::update() {
+	if (this->pace_bms_v25_ == nullptr &&
+		this->pace_bms_v20_ == nullptr)
+		return;
+
+	// writes are always processed first so no need to check that as well
+	if (!read_queue_.empty()) {
+		ESP_LOGI(TAG, "Commands still in queue on update(), skipping this refresh cycle; Could not speak with the BMS fast enough, possible solutions: increase update_interval, reduce request_throttle, decrease the number of sensors (relevant for multiple chained battery pack setups).");
+	}
+	else {
+		if (this->pace_bms_v25_ != nullptr) {
+			ESP_LOGV(TAG, "Queueing v25 refresh commands");
+
+			if (this->bms_count_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read BMS count");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadBmsCountRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_bms_count_response_v25(response); };
+				read_queue_.push(item);
+			}
+
+			// asking for analog info is always the first thing (here, and also in setup() if applicable) so that we can sniff the User Defined Value field to determine the protocol variant
+
+			// start analog info ====================
+			// if no slaves, or in relay (non-broadcast) mode anyway, do a direct query for this bms
+			if(this->slaves_.size() == 0 || this->slave_query_mode_ == SLAVE_QUERY_MODE_RELAY) {
+				// but only if needed
+				if (this->analog_information_callbacks_v25_.size() > 0) {
+					command_item* item = new command_item;
+					item->description_ = std::string("read analog information (direct for master)");
+					item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadAnalogInformationRequest(this->address_, this->address_, request); };
+					item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_analog_information_response_v25(response, this); };
+					read_queue_.push(item);
+				}
+			}
+			// if slaves exist
+			if(this->slaves_.size() > 0) { 
+				// see if we, or any slaves, need a query
+				bool masterAnalogInfoNeeded = this->analog_information_callbacks_v25_.size() > 0;
+				bool atLeastOneSlaveAnalogInfoNeeded = false;
+				for(int slaveIndex = 0; slaveIndex < this->slaves_.size(); slaveIndex++) {
+					pace_bms_slave::PaceBmsSlave* slave = this->slaves_[slaveIndex];
+					if (slave->get_analog_information_callbacks_v25().size() > 0) {
+						atLeastOneSlaveAnalogInfoNeeded = true;
+					}
+				}
+				bool anyAnalogInfoNeededAtAll = masterAnalogInfoNeeded || atLeastOneSlaveAnalogInfoNeeded;
+				// if anyone at all wants analog info, and we're in broadcast mode, do a broadcast request
+				if(anyAnalogInfoNeededAtAll == true && this->slave_query_mode_ == SLAVE_QUERY_MODE_BROADCAST) {
+					command_item* item = new command_item;
+					item->description_ = std::string("read analog information (broadcast)");
+					item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadAnalogInformationRequest(this->address_, 0xFF, request); };
+					item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_broadcast_read_analog_information_response_v25(response); };
+					read_queue_.push(item);
+				}
+				// if any slaves need analog info and we're in relay mode, do a direct query for them (master was already checked and directly queried if needed)
+				if(atLeastOneSlaveAnalogInfoNeeded && this->slave_query_mode_ == SLAVE_QUERY_MODE_RELAY) {
+					for(int slaveIndex = 0; slaveIndex < this->slaves_.size(); slaveIndex++) {
+						pace_bms_slave::PaceBmsSlave* slave = this->slaves_[slaveIndex];
+						// but only if needed
+						if(slave->get_analog_information_callbacks_v25().size() > 0) {
+							command_item* item = new command_item;
+							item->description_ = std::string("read analog information (relay to slave address " + std::to_string(slave->get_address()) + ")");
+							item->create_request_frame_ = [this, slave](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadAnalogInformationRequest(this->address_, slave->get_address(), request); };
+							item->process_response_frame_ = [this, slave](std::span<uint8_t>& response) -> void { this->handle_read_analog_information_response_v25(response, slave); };
+							read_queue_.push(item);
+						}
+					}
+				}
+			}
+			// end analog info ====================
+
+			// start status info ====================
+			// if no slaves, or in relay (non-broadcast) mode anyway, do a direct query for this bms
+			if(this->slaves_.size() == 0 || this->slave_query_mode_ == SLAVE_QUERY_MODE_RELAY) {
+				// but only if needed
+				if (this->status_information_callbacks_v25_.size() > 0) {
+					command_item* item = new command_item;
+					item->description_ = std::string("read status information (direct for master)");
+					item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadStatusInformationRequest(this->address_, this->address_, request); };
+					item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_status_information_response_v25(response, this); };
+					read_queue_.push(item);
+				}
+			}
+			// if slaves exist
+			if(this->slaves_.size() > 0) { 
+				// see if we, or any slaves, need a query
+				bool masterStatusInfoNeeded = this->status_information_callbacks_v25_.size() > 0;
+				bool atLeastOneSlaveStatusInfoNeeded = false;
+				for(int slaveIndex = 0; slaveIndex < this->slaves_.size(); slaveIndex++) {
+					pace_bms_slave::PaceBmsSlave* slave = this->slaves_[slaveIndex];
+					if (slave->get_status_information_callbacks_v25().size() > 0) {
+						atLeastOneSlaveStatusInfoNeeded = true;
+					}
+				}
+				bool anyStatusInfoNeededAtAll = masterStatusInfoNeeded || atLeastOneSlaveStatusInfoNeeded;
+				// if anyone at all wants status info, and we're in broadcast mode, do a broadcast request
+				if(anyStatusInfoNeededAtAll == true && this->slave_query_mode_ == SLAVE_QUERY_MODE_BROADCAST) {
+					command_item* item = new command_item;
+					item->description_ = std::string("read status information (broadcast)");
+					item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadStatusInformationRequest(this->address_, 0xFF, request); };
+					item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_broadcast_read_status_information_response_v25(response); };
+					read_queue_.push(item);
+				}
+				// if any slaves need status info and we're in relay mode, do a direct query for them (master was already checked and directly queried if needed)
+				if(atLeastOneSlaveStatusInfoNeeded && this->slave_query_mode_ == SLAVE_QUERY_MODE_RELAY) {
+					for(int slaveIndex = 0; slaveIndex < this->slaves_.size(); slaveIndex++) {
+						pace_bms_slave::PaceBmsSlave* slave = this->slaves_[slaveIndex];
+						// but only if needed
+						if(slave->get_status_information_callbacks_v25().size() > 0) {
+							pace_bms_slave::PaceBmsSlave* slave = this->slaves_[slaveIndex];
+							command_item* item = new command_item;
+							item->description_ = std::string("read status information (relay to slave address " + std::to_string(slave->get_address()) + ")");
+							item->create_request_frame_ = [this, slave](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadStatusInformationRequest(this->address_, slave->get_address(), request); };
+							item->process_response_frame_ = [this, slave](std::span<uint8_t>& response) -> void { this->handle_read_status_information_response_v25(response, slave); };
+							read_queue_.push(item);
+						}
+					}
+				}
+			}
+			// end status info ====================
+
+			if (this->hardware_version_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read hardware version");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadHardwareVersionRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_hardware_version_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->serial_number_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read serial number");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadSerialNumberRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_serial_number_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->protocols_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read protocols");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadProtocolsRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_protocols_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->cell_over_voltage_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read cell over voltage configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_CellOverVoltage, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_cell_over_voltage_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->pack_over_voltage_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read pack over voltage configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_PackOverVoltage, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_pack_over_voltage_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->cell_under_voltage_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read cell under voltage configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_CellUnderVoltage, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_cell_under_voltage_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->pack_under_voltage_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read pack under voltage configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_PackUnderVoltage, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_pack_under_voltage_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->charge_over_current_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read charge over current configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_ChargeOverCurrent, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_charge_over_current_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->discharge_over_current1_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read discharge over current 1 configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_DischargeOverCurrent1, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_discharge_over_current1_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->discharge_over_current2_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read discharge over current 2 configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_DischargeOverCurrent2, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_discharge_over_current2_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->short_circuit_protection_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read short circuit protection configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_ShortCircuitProtection, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_short_circuit_protection_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->cell_balancing_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read cell balancing configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_CellBalancing, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_cell_balancing_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->sleep_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read sleep configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_Sleep, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_sleep_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->full_charge_low_charge_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read full charge low charge configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_FullChargeLowCharge, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_full_charge_low_charge_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->charge_and_discharge_over_temperature_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read charge and discharge over temperature configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_ChargeAndDischargeOverTemperature, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_charge_and_discharge_over_temperature_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->charge_and_discharge_under_temperature_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read charge and discharge under temperature configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_ChargeAndDischargeUnderTemperature, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_charge_and_discharge_under_temperature_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->system_datetime_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read system date/time");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadSystemDateTimeRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_system_datetime_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->mosfet_over_temperature_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read mosfet over temperature configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_MosfetOverTemperature, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_mosfet_over_temperature_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+			if (this->environment_over_under_temperature_configuration_callbacks_v25_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read environment over/under temperature configuration");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateReadConfigurationRequest(this->address_, PaceBmsProtocolV25::RC_EnvironmentOverUnderTemperature, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_environment_over_under_temperature_configuration_response_v25(response); };
+				read_queue_.push(item);
+			}
+		}
+		else if (this->pace_bms_v20_ != nullptr) {
+			ESP_LOGV(TAG, "Queueing v20 refresh commands");
+
+			if (this->analog_information_callbacks_v20_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read analog information");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v20_->CreateReadAnalogInformationRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_analog_information_response_v20(response); };
+				read_queue_.push(item);
+			}
+			if (this->status_information_callbacks_v20_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read status information");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v20_->CreateReadStatusInformationRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_status_information_response_v20(response); };
+				read_queue_.push(item);
+			}
+			if (this->hardware_version_callbacks_v20_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read hardware version");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v20_->CreateReadHardwareVersionRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_hardware_version_response_v20(response); };
+				read_queue_.push(item);
+			}
+			if (this->serial_number_callbacks_v20_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read serial number");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v20_->CreateReadSerialNumberRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_serial_number_response_v20(response); };
+				read_queue_.push(item);
+			}
+			if (this->system_datetime_callbacks_v20_.size() > 0) {
+				command_item* item = new command_item;
+				item->description_ = std::string("read system date/time");
+				item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v20_->CreateReadSystemDateTimeRequest(this->address_, request); };
+				item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_read_system_datetime_response_v20(response); };
+				read_queue_.push(item);
+			}
+		}
+
+		ESP_LOGV(TAG, "Read commands queued: %i", (int)(read_queue_.size()));
+	}
+}
+
+/*
+* incrementally process incoming bytes off the bus, eventually dispatching a full response to process_response_frame_
+* once request_throttle has been satisfied and no request is outstanding, call send_next_request_frame to continue popping the read/write queues
+*/
+
+void PaceBmsMaster::loop() {
+	if (this->pace_bms_v25_ == nullptr &&
+		this->pace_bms_v20_ == nullptr)
+		return;
+
+	// update a single sensor per loop, this is still 60 updates/second but prevents excessive loop times
+	if (this->sensor_update_queue_.size() != 0)
+	{
+		std::function<void()> sensor_update_method = this->sensor_update_queue_.front();
+		this->sensor_update_queue_.pop();
+		sensor_update_method();
+	}
+	// don't continue while sensor publishes are pending
+	if (this->sensor_update_queue_.size() != 0)
+		return;
+
+	// if there is no request active, throw away any incoming data before proceeding
+	if (this->request_outstanding_ == false &&
+		this->available() != 0) {
+		uint8_t byte;
+		uint16_t discarded_bytes = 0;
+		while (this->available() != 0) {
+			this->read_byte(&byte);
+			discarded_bytes++;
+		}
+		ESP_LOGV(TAG, "Threw away %i bytes of incoming data because there is no request active", discarded_bytes);
+	}
+
+	const uint32_t now = millis();
+
+	// if no request is active, we are not throttled, and there are pending requests to send, do so
+	if (this->request_outstanding_ == false &&
+		now - this->last_transmit_ >= this->request_throttle_ &&
+		(this->read_queue_.size() > 0 || this->write_queue_.size() > 0)) {
+		// this will do any desired logging
+		this->send_next_request_frame_();
+		this->request_outstanding_ = true;
+		this->last_transmit_ = now;
+		this->last_receive_ = now;
+		this->raw_data_index_ = 0;
+		return;
+	}
+
+	// if a request is active but we have passed the response timeout period and no more data is available, abandon the request
+	if (this->request_outstanding_ == true &&
+		now - this->last_receive_ >= this->response_timeout_ &&
+		this->available() == 0) {
+		if (this->raw_data_index_ > 0) {
+			std::string str(this->raw_data_, this->raw_data_ + this->raw_data_index_ + 1);
+			ESP_LOGW(TAG, "Response frame timeout for request %s after %i ms, partial frame: %s", this->last_request_description.c_str(), now - this->last_receive_, str.c_str());
+		}
+		else {
+			ESP_LOGW(TAG, "Response frame timeout for request %s after %i ms, no valid data received", this->last_request_description.c_str(), now - this->last_receive_);
+		}
+		request_outstanding_ = false;
+		this->raw_data_index_ = 0;
+		return;
+	}
+
+	// if no data or no request outstanding, nothing to do
+	if (this->available() == 0 ||
+		this->request_outstanding_ == false) {
+		return;
+	}
+
+	// reset timer since we're actively receiving
+	this->last_receive_ = now;
+
+	while (this->available() != 0) {
+		// note that while it might theoretically be prefereable to be able to grab a pointer to the raw UART buffer instead of duplicating the 
+		// data in memory, there is no way to do that for some very good reasons
+		this->read_byte(&this->raw_data_[this->raw_data_index_]);
+
+		// is the SOI marker present at byte 0?
+		if (this->raw_data_index_ == 0 && this->raw_data_[this->raw_data_index_] != '~') {
+			ESP_LOGV(TAG, "Response frame does not begin with '~', actual: 0x%02X = '%c'", this->raw_data_[this->raw_data_index_], this->raw_data_[this->raw_data_index_]);
+			request_outstanding_ = false;
+			this->raw_data_index_ = 0;
+			return;
+		}
+
+		// is this the end of a frame? process it
+		if (this->raw_data_[this->raw_data_index_] == '\r') {
+			// this will do any desired logging
+			this->process_response_frame_(this->raw_data_, this->raw_data_index_ + 1);
+			request_outstanding_ = false;
+			this->raw_data_index_ = 0;
+			return;
+		}
+
+		// did we run out of buffer before EOI?
+		if (this->raw_data_index_ + 1 >= this->rx_buffer_size_) {
+			std::string str(this->raw_data_, this->raw_data_ + this->raw_data_index_ + 1);
+			// todo: chunked log of truncated response frame
+			//ESP_LOGV(TAG, "Response frame exceeds maximum supported length, increase rx_buffer_size (recommended: 256 * number of battery packs), last request was '%s', incomplete response frame: %s", this->last_request_description.c_str(), str.c_str());
+			ESP_LOGV(TAG, "Response frame exceeds maximum supported length, increase rx_buffer_size (recommended: 256 * number of battery packs), last request was '%s'", this->last_request_description.c_str());
+			request_outstanding_ = false;
+			this->raw_data_index_ = 0;
+			return;
+		}
+
+		this->raw_data_index_++;
+	}
+}
+
+// pops the next item off of this->command_queue_, generates and dispatches a request frame, and sets up this->next_response_handler_
+void PaceBmsMaster::send_next_request_frame_() {
+
+	if (read_queue_.empty() && write_queue_.empty()) {
+		ESP_LOGE(TAG, "command queue empty on send_next_request_frame");
+		return;
+	}
+
+	// always process writes first
+	PaceBmsMaster::command_item* command;
+	if (!write_queue_.empty()) {
+		command = write_queue_.front();
+		write_queue_.pop_front();
+	}
+	else {
+		command = read_queue_.front();
+		read_queue_.pop();
+	}
+
+	// process_response_frame_ will call this on the next frame received
+	this->next_response_handler_ = command->process_response_frame_;
+	// saved for logging
+	this->last_request_description = command->description_;
+
+	std::vector<uint8_t> request;
+	if (false == command->create_request_frame_(request)) {
+		ESP_LOGE(TAG, "Error creating '%s' request frame", command->description_.c_str());
+		return;
+	}
+
+	ESP_LOGD(TAG, "Sending '%s' request", command->description_.c_str());
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERY_VERBOSE
+	{
+		std::string str(request.data(), request.data() + request.size());
+		ESP_LOGVV(TAG, "Request frame: %s", str.c_str());
+	}
+#endif
+
+	if (this->flow_control_pin_ != nullptr)
+		this->flow_control_pin_->digital_write(true);
+	this->write_array(request.data(), request.size());
+	// if flow control is required (rs485 does read+write on the same differential pair) then I don't see any other option than to block on flush()
+	// if using rs232, a flow control pin should not be assigned in yaml in order to avoid this block
+	if (this->flow_control_pin_ != nullptr) {
+		this->flush();
+		this->flow_control_pin_->digital_write(false);
+	}
+
+	delete(command);
+}
+
+// calls this->next_response_handler_ (set up from the previously dispatched command_queue_ item)
+void PaceBmsMaster::process_response_frame_(uint8_t* frame_bytes, uint16_t frame_length) {
+	ESP_LOGV(TAG, "Processing response frame for '%s' request", this->last_request_description.c_str());
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERY_VERBOSE
+	{
+		const int maxChunkSize = 100;
+
+		// log the frame, but split it up into chunks if it's too long for a single log entry
+		// this prevents the esp32 logging buffer from being exceeded and cutting off the log entry
+		// or simply just dropping the log entirely which is what I've seen happen
+		if(frame_length > maxChunkSize)
+		{
+			int charsRemaining = frame_length;
+			int offset = 0;
+
+			int chunkNum = 1;
+			int totalChunks = (frame_length / maxChunkSize) + (frame_length % maxChunkSize == 0 ? 0 : 1);
+
+			while(charsRemaining > 0)
+			{
+				int chunkSize = charsRemaining > maxChunkSize ? maxChunkSize : charsRemaining;
+
+				std::string str(frame_bytes + offset, frame_bytes + offset + chunkSize);
+				ESP_LOGVV(TAG, "Response frame (part %i of %i): %s", chunkNum, totalChunks, str.c_str());
+
+				charsRemaining -= chunkSize;
+				offset += chunkSize;
+
+				chunkNum++;
+			}
+		}
+		else // just log the entire thing in one go if short enough
+		{
+			std::string str(frame_bytes, frame_bytes + frame_length);
+			ESP_LOGVV(TAG, "Response frame: %s", str.c_str());
+		}
+	}
+#endif
+
+	std::span<uint8_t> response = std::span<uint8_t>(frame_bytes, frame_length);
+
+	if (next_response_handler_ != nullptr)
+		next_response_handler_(response);
+	else
+		ESP_LOGE(TAG, "Response frame received but no response handler set");
+
+	// this request/response pair is complete, any additional frames received will not be expected and should not be processed until the next command queue pop / send
+	next_response_handler_ = nullptr;
+}
+
+/*
+* read/write response frame received handlers, called via next_response_handler_ from process_response_frame
+*/
+
+void PaceBmsMaster::handle_read_bms_count_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	uint8_t bmsCount = -1;
+	bool result = this->pace_bms_v25_->ProcessReadBmsCountResponse(this->address_, this->responding_address_, response, bmsCount);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	// we want this in logs, but also don't want to spam the logs
+	static bool haveLogged = false;
+	if(!haveLogged) {
+		ESP_LOGI(TAG, "Master BMS reports %i BMSes present including %i slaves, predicted (but unverified) slave address range: %i to %i", bmsCount, bmsCount - 1, this->get_address() + 1, this->get_address() + bmsCount - 1);
+		haveLogged = true;
+	}
+
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->bms_count_callbacks_v25_.size(); i++) {
+		bms_count_callbacks_v25_[i](bmsCount);
+	}
+}
+
+void PaceBmsMaster::handle_slave_discovery_broadcast_read_analog_information_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	auto onPayload = [this](uint8_t payloadCount, uint8_t index, PaceBmsProtocolV25::AnalogInformation& payload) -> void {
+		// must be static since this is a callback - this method is only going to be called once anyway, since it's only queued on setup if requested
+		static bool haveLogged = false;
+		if(!haveLogged) {
+			// dispatch to any child components that registered for payload count
+			for (int i = 0; i < this->payload_count_callbacks_v25_.size(); i++) {
+				payload_count_callbacks_v25_[i](payloadCount);
+			}
+			if(payloadCount > 1)
+				ESP_LOGI(TAG, "Discovered %i slaves using broadcast Analog Information request, predicted (but unverified) slave address range: %i to %i", payloadCount - 1, this->get_address() + 1, this->get_address() + payloadCount - 1);
+			else
+				ESP_LOGI(TAG, "No slaves discovered using broadcast Analog Information request");
+			
+			haveLogged = true;
+		}
+	};
+
+	// note that we're executing a callback but it is syncronous
+	bool result = this->pace_bms_v25_->ProcessReadAnalogInformationResponse(this->address_, 0xFF, this->responding_address_, response, onPayload, true);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_slave_discovery_broadcast_read_status_information_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	auto onPayload = [this](uint8_t payloadCount, uint8_t index, PaceBmsProtocolV25::StatusInformation& payload) -> void {
+		// must be static since this is a callback - this method is only going to be called once anyway, since it's only queued on setup if requested
+		static bool haveLogged = false;
+		if(!haveLogged) {
+			// dispatch to any child components that registered for payload count
+			for (int i = 0; i < this->payload_count_callbacks_v25_.size(); i++) {
+				payload_count_callbacks_v25_[i](payloadCount);
+			}
+			if(payloadCount > 1)
+				ESP_LOGI(TAG, "Discovered %i slaves using broadcast Status Information request, predicted (but unverified) slave address range: %i to %i", payloadCount - 1, this->get_address() + 1, this->get_address() + payloadCount - 1);
+			else
+				ESP_LOGI(TAG, "No slaves discovered using broadcast Status Information request");
+			
+			haveLogged = true;
+		}
+	};
+
+	// note that we're executing a callback but it is syncronous
+	bool result = this->pace_bms_v25_->ProcessReadStatusInformationResponse(this->address_, 0xFF, this->responding_address_, response, onPayload, true);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_slave_discovery_relay_read_analog_information_response_v25(uint8_t slaveAddress, std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v25_->ProcessReadAnalogInformationResponse(this->address_, slaveAddress, this->responding_address_, response, nullptr, true);
+	if (result == false) {
+		ESP_LOGV(TAG, "No slave discovered at address %i using relay Analog Information request", slaveAddress);
+		return;
+	}
+
+	ESP_LOGI(TAG, "Discovered slave at address %i using relay Analog Information request", slaveAddress);
+}
+
+void PaceBmsMaster::handle_slave_discovery_relay_read_status_information_response_v25(uint8_t slaveAddress, std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v25_->ProcessReadStatusInformationResponse(this->address_, slaveAddress, this->responding_address_, response, nullptr, true);
+	if (result == false) {
+		ESP_LOGV(TAG, "No slave discovered at address %i using relay Status Information request", slaveAddress);
+		return;
+	}
+
+	ESP_LOGI(TAG, "Discovered slave at address %i using relay Status Information request", slaveAddress);
+}
+
+void PaceBmsMaster::handle_read_analog_information_response_v25(std::span<uint8_t>& response, pace_bms_base::PaceBmsBase* target) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	auto onPayload = [this, target](uint8_t payloadCount, uint8_t index, PaceBmsProtocolV25::AnalogInformation& payload) -> void {
+		// dispatch to any child components that registered for a callback with the bms
+		for (int i = 0; i < target->get_analog_information_callbacks_v25().size(); i++) {
+			target->get_analog_information_callbacks_v25()[i](payload);
+		}
+	};
+
+	// note that we're executing a callback but it is syncronous
+	bool result = this->pace_bms_v25_->ProcessReadAnalogInformationResponse(this->address_, target->get_address(), this->responding_address_, response, onPayload);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_read_status_information_response_v25(std::span<uint8_t>& response, pace_bms_base::PaceBmsBase* target) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+	// Log raw status frame as hex for historical validation
+	{
+		std::string hex;
+		char buf[4];
+		for(int i = 0; i < (int)response.size(); i++) {
+			snprintf(buf, sizeof(buf), "%02X ", response[i]);
+			hex += buf;
+		}
+		ESP_LOGD(TAG, "STATUS RAW: %s", hex.c_str());
+	}
+
+	auto onPayload = [this, target](uint8_t payloadCount, uint8_t index, PaceBmsProtocolV25::StatusInformation& payload) -> void {
+		// dispatch to any child components that registered for a callback with the bms
+		for (int i = 0; i < target->get_status_information_callbacks_v25().size(); i++) {
+			target->get_status_information_callbacks_v25()[i](payload);
+		}
+	};
+
+	// note that we're executing a callback but it is syncronous
+	bool result = this->pace_bms_v25_->ProcessReadStatusInformationResponse(this->address_, target->get_address(), this->responding_address_, response, onPayload);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_broadcast_read_analog_information_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	int dispatchedCount = 0;
+	auto onPayload = [this, &dispatchedCount](uint8_t payloadCount, uint8_t index, PaceBmsProtocolV25::AnalogInformation& payload) -> void {
+		dispatchedCount++;
+		if(index == 0) {
+			// dispatch to any child components that registered for payload count
+			for (int i = 0; i < this->payload_count_callbacks_v25_.size(); i++) {
+				payload_count_callbacks_v25_[i](payloadCount);
+			}
+			// dispatch to any child components that registered for a callback with us
+			for (int i = 0; i < this->analog_information_callbacks_v25_.size(); i++) {
+				this->analog_information_callbacks_v25_[i](payload);
+			}
+		} else {
+			if(index > this->slaves_.size()) {
+				// logging of mismatch happens after ProcessReadAnalogInformationResponse completes
+				return;
+			}
+
+			// dispatch to slaves
+			pace_bms_slave::PaceBmsSlave* slave = this->slaves_[index - 1];
+			std::vector<std::function<void(PaceBmsProtocolV25::AnalogInformation&)>> slave_callbacks = slave->get_analog_information_callbacks_v25();
+
+			// dispatch to any child components that registered for a callback with the slave
+			for (int i = 0; i < slave_callbacks.size(); i++) {
+				slave_callbacks[i](payload);
+			}
+		}
+	};
+
+	// note that we're executing a callback but it is syncronous
+	bool result = this->pace_bms_v25_->ProcessReadAnalogInformationResponse(this->address_, 0xFF, this->responding_address_, response, onPayload);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	if(dispatchedCount != this->slaves_.size() + 1) {
+		ESP_LOGE(TAG, "%i Analog Information payloads were returned and decoded successfully, but %i BMSes are configured)", dispatchedCount, (int)(this->slaves_.size() + 1));
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_broadcast_read_status_information_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	int dispatchedCount = 0;
+	auto onPayload = [this, &dispatchedCount](uint8_t payloadCount, uint8_t index, PaceBmsProtocolV25::StatusInformation& payload) -> void {
+		dispatchedCount++;
+		if(index == 0) {
+			// dispatch to any child components that registered for payload count
+			for (int i = 0; i < this->payload_count_callbacks_v25_.size(); i++) {
+				payload_count_callbacks_v25_[i](payloadCount);
+			}
+			// dispatch to any child components that registered for a callback with us
+			for (int i = 0; i < this->status_information_callbacks_v25_.size(); i++) {
+				this->status_information_callbacks_v25_[i](payload);
+			}
+		} else {
+			if(index > this->slaves_.size()) {
+				// logging of mismatch happens after ProcessReadAnalogInformationResponse completes
+				return;
+			}
+
+			// dispatch to slaves
+			pace_bms_slave::PaceBmsSlave* slave = this->slaves_[index - 1];
+			std::vector<std::function<void(PaceBmsProtocolV25::StatusInformation&)>> slave_callbacks = slave->get_status_information_callbacks_v25();
+
+			// dispatch to any child components that registered for a callback with the slave
+			for (int i = 0; i < slave_callbacks.size(); i++) {
+				slave_callbacks[i](payload);
+			}
+		}
+	};
+
+	// note that we're executing a callback but it is syncronous
+	bool result = this->pace_bms_v25_->ProcessReadStatusInformationResponse(this->address_, 0xFF, this->responding_address_, response, onPayload);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	if(dispatchedCount != this->slaves_.size() + 1) {
+		ESP_LOGE(TAG, "%i Status Information payloads were returned and decoded successfully, but %i BMSes are configured)", dispatchedCount, (int)(this->slaves_.size() + 1));
+		return;
+	}
+}
+
+
+
+
+
+
+void PaceBmsMaster::handle_read_hardware_version_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	std::string hardware_version;
+	bool result = this->pace_bms_v25_->ProcessReadHardwareVersionResponse(this->address_, this->responding_address_, response, hardware_version);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->hardware_version_callbacks_v25_.size(); i++) {
+		hardware_version_callbacks_v25_[i](hardware_version);
+	}
+}
+
+void PaceBmsMaster::handle_read_serial_number_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	std::string serial_number;
+	bool result = this->pace_bms_v25_->ProcessReadSerialNumberResponse(this->address_, this->responding_address_, response, serial_number);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->serial_number_callbacks_v25_.size(); i++) {
+		serial_number_callbacks_v25_[i](serial_number);
+	}
+}
+
+void PaceBmsMaster::handle_write_switch_command_response_v25(PaceBmsProtocolV25::SwitchCommand switch_command, std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v25_->ProcessWriteSwitchCommandResponse(this->address_, this->responding_address_, switch_command, response);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_write_mosfet_switch_command_response_v25(PaceBmsProtocolV25::MosfetType type, PaceBmsProtocolV25::MosfetState state, std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v25_->ProcessWriteMosfetSwitchCommandResponse(this->address_, this->responding_address_, type, state, response);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_write_shutdown_command_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v25_->ProcessWriteShutdownCommandResponse(this->address_, this->responding_address_, response);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_read_protocols_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::Protocols protocols;
+	bool result = this->pace_bms_v25_->ProcessReadProtocolsResponse(this->address_, this->responding_address_, response, protocols);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_write_protocols_response_v25(PaceBmsProtocolV25::Protocols protocols, std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v25_->ProcessWriteProtocolsResponse(this->address_, this->responding_address_, response);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_read_cell_over_voltage_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::CellOverVoltageConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->cell_over_voltage_configuration_callbacks_v25_.size(); i++) {
+		cell_over_voltage_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_pack_over_voltage_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::PackOverVoltageConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->pack_over_voltage_configuration_callbacks_v25_.size(); i++) {
+		pack_over_voltage_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_cell_under_voltage_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::CellUnderVoltageConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->cell_under_voltage_configuration_callbacks_v25_.size(); i++) {
+		cell_under_voltage_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_pack_under_voltage_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::PackUnderVoltageConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->pack_under_voltage_configuration_callbacks_v25_.size(); i++) {
+		pack_under_voltage_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_charge_over_current_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::ChargeOverCurrentConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->charge_over_current_configuration_callbacks_v25_.size(); i++) {
+		charge_over_current_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_discharge_over_current1_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::DischargeOverCurrent1Configuration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->discharge_over_current1_configuration_callbacks_v25_.size(); i++) {
+		discharge_over_current1_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_discharge_over_current2_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::DischargeOverCurrent2Configuration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->discharge_over_current2_configuration_callbacks_v25_.size(); i++) {
+		discharge_over_current2_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_short_circuit_protection_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::ShortCircuitProtectionConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->short_circuit_protection_configuration_callbacks_v25_.size(); i++) {
+		short_circuit_protection_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_cell_balancing_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::CellBalancingConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->cell_balancing_configuration_callbacks_v25_.size(); i++) {
+		cell_balancing_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_sleep_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::SleepConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->sleep_configuration_callbacks_v25_.size(); i++) {
+		sleep_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_full_charge_low_charge_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::FullChargeLowChargeConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->full_charge_low_charge_configuration_callbacks_v25_.size(); i++) {
+		full_charge_low_charge_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_charge_and_discharge_over_temperature_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::ChargeAndDischargeOverTemperatureConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->charge_and_discharge_over_temperature_configuration_callbacks_v25_.size(); i++) {
+		charge_and_discharge_over_temperature_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_charge_and_discharge_under_temperature_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::ChargeAndDischargeUnderTemperatureConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->charge_and_discharge_under_temperature_configuration_callbacks_v25_.size(); i++) {
+		charge_and_discharge_under_temperature_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_write_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v25_->ProcessWriteConfigurationResponse(this->address_, this->responding_address_, response);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_read_system_datetime_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::DateTime dt;
+	bool result = this->pace_bms_v25_->ProcessReadSystemDateTimeResponse(this->address_, this->responding_address_, response, dt);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->system_datetime_callbacks_v25_.size(); i++) {
+		system_datetime_callbacks_v25_[i](dt);
+	}
+}
+
+void PaceBmsMaster::handle_read_mosfet_over_temperature_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::MosfetOverTemperatureConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->mosfet_over_temperature_configuration_callbacks_v25_.size(); i++) {
+		mosfet_over_temperature_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_read_environment_over_under_temperature_configuration_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV25::EnvironmentOverUnderTemperatureConfiguration config;
+	bool result = this->pace_bms_v25_->ProcessReadConfigurationResponse(this->address_, this->responding_address_, response, config);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->environment_over_under_temperature_configuration_callbacks_v25_.size(); i++) {
+		environment_over_under_temperature_configuration_callbacks_v25_[i](config);
+	}
+}
+
+void PaceBmsMaster::handle_write_system_datetime_response_v25(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v25_->ProcessWriteSystemDateTimeResponse(this->address_, this->responding_address_, response);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+
+void PaceBmsMaster::handle_read_analog_information_response_v20(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV20::AnalogInformation analog_information;
+	bool result = this->pace_bms_v20_->ProcessReadAnalogInformationResponse(this->address_, this->address_, this->responding_address_, response, analog_information);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->analog_information_callbacks_v20_.size(); i++) {
+		analog_information_callbacks_v20_[i](analog_information);
+	}
+}
+
+void PaceBmsMaster::handle_read_status_information_response_v20(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV20::StatusInformation status_information;
+	bool result = this->pace_bms_v20_->ProcessReadStatusInformationResponse(this->address_, this->address_, this->responding_address_, response, status_information);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->status_information_callbacks_v20_.size(); i++) {
+		status_information_callbacks_v20_[i](status_information);
+	}
+}
+
+void PaceBmsMaster::handle_read_hardware_version_response_v20(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	std::string hardware_version;
+	bool result = this->pace_bms_v20_->ProcessReadHardwareVersionResponse(this->address_, this->responding_address_, response, hardware_version);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->hardware_version_callbacks_v20_.size(); i++) {
+		hardware_version_callbacks_v20_[i](hardware_version);
+	}
+}
+
+void PaceBmsMaster::handle_read_serial_number_response_v20(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	std::string serial_number;
+	bool result = this->pace_bms_v20_->ProcessReadSerialNumberResponse(this->address_, this->responding_address_, response, serial_number);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->serial_number_callbacks_v20_.size(); i++) {
+		serial_number_callbacks_v20_[i](serial_number);
+	}
+}
+
+void PaceBmsMaster::handle_write_shutdown_command_response_v20(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v20_->ProcessWriteShutdownCommandResponse(this->address_, this->responding_address_, response);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+void PaceBmsMaster::handle_read_system_datetime_response_v20(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	PaceBmsProtocolV20::DateTime dt;
+	bool result = this->pace_bms_v20_->ProcessReadSystemDateTimeResponse(this->address_, this->responding_address_, response, dt);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+	// dispatch to any child components that registered for a callback with us
+	for (int i = 0; i < this->system_datetime_callbacks_v20_.size(); i++) {
+		system_datetime_callbacks_v20_[i](dt);
+	}
+}
+
+void PaceBmsMaster::handle_write_system_datetime_response_v20(std::span<uint8_t>& response) {
+	ESP_LOGD(TAG, "Processing '%s' response", this->last_request_description.c_str());
+
+	bool result = this->pace_bms_v20_->ProcessWriteSystemDateTimeResponse(this->address_, this->responding_address_, response);
+	if (result == false) {
+		ESP_LOGE(TAG, "Unable to decode '%s' response", this->last_request_description.c_str());
+		return;
+	}
+}
+
+/*
+* these are called from from user-settable child sensors to set BMS state
+*/
+
+// helper for when multiple writes are requested due to fast UX interaction
+void PaceBmsMaster::write_queue_push_back_with_deduplication(command_item* item) {
+	auto iter = std::find_if(this->write_queue_.begin(), this->write_queue_.end(),
+		[&item](const command_item* test) -> bool {
+			return test->description_ == item->description_;
+		});
+
+	if (iter != this->write_queue_.end()) {
+		std::swap((*iter), item);
+		delete item;
+	}
+	else {
+		this->write_queue_.push_back(item);
+	}
+}
+
+void PaceBmsMaster::write_switch_state_v25(PaceBmsProtocolV25::SwitchCommand state) {
+	command_item* item = new command_item;
+
+	// this is just to generate the text
+	switch (state) {
+	case PaceBmsProtocolV25::SC_DisableBuzzer:
+	case PaceBmsProtocolV25::SC_EnableBuzzer:
+		item->description_ = std::string("write buzzer alarm state ") + (state == PaceBmsProtocolV25::SC_EnableBuzzer ? "ON" : "OFF");
+		break;
+	case PaceBmsProtocolV25::SC_DisableLedWarning:
+	case PaceBmsProtocolV25::SC_EnableLedWarning:
+		item->description_ = std::string("write led alarm state ") + (state == PaceBmsProtocolV25::SC_EnableLedWarning ? "ON" : "OFF");
+		break;
+	case PaceBmsProtocolV25::SC_DisableChargeCurrentLimiter:
+	case PaceBmsProtocolV25::SC_EnableChargeCurrentLimiter:
+		item->description_ = std::string("write charge current limiter state ") + (state == PaceBmsProtocolV25::SC_EnableChargeCurrentLimiter ? "ON" : "OFF");
+		break;
+	case PaceBmsProtocolV25::SC_SetChargeCurrentLimiterCurrentLimitHighGear:
+	case PaceBmsProtocolV25::SC_SetChargeCurrentLimiterCurrentLimitLowGear:
+		item->description_ = std::string("write charge current limiter gear ") + (state == PaceBmsProtocolV25::SC_SetChargeCurrentLimiterCurrentLimitHighGear ? "High" : "Low");
+	}
+
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, state](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteSwitchCommandRequest(this->address_, state, request); };
+	item->process_response_frame_ = [this, state](std::span<uint8_t>& response) -> void { this->handle_write_switch_command_response_v25(state, response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_mosfet_state_v25(PaceBmsProtocolV25::MosfetType type, PaceBmsProtocolV25::MosfetState state) {
+	command_item* item = new command_item;
+
+	// this is just to generate the text
+	switch (type) {
+	case PaceBmsProtocolV25::MT_Charge:
+		item->description_ = std::string("write charge mosfet state ") + (state == PaceBmsProtocolV25::MS_Open ? "Open" : "Closed");
+		break;
+	case PaceBmsProtocolV25::MT_Discharge:
+		item->description_ = std::string("write discharge mosfet state ") + (state == PaceBmsProtocolV25::MS_Open ? "Open" : "Closed");
+		break;
+	}
+
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, type, state](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteMosfetSwitchCommandRequest(this->address_, type, state, request); };
+	item->process_response_frame_ = [this, type, state](std::span<uint8_t>& response) -> void { this->handle_write_mosfet_switch_command_response_v25(type, state, response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_shutdown_v25() {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write shutdown");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteShutdownCommandRequest(this->address_, request); };
+	item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_write_shutdown_command_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_protocols_v25(PaceBmsProtocolV25::Protocols& protocols) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write protocols");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, protocols](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteProtocolsRequest(this->address_, protocols, request); };
+	item->process_response_frame_ = [this, protocols](std::span<uint8_t>& response) -> void { this->handle_write_protocols_response_v25(protocols, response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_cell_over_voltage_configuration_v25(PaceBmsProtocolV25::CellOverVoltageConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write cell over voltage configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_pack_over_voltage_configuration_v25(PaceBmsProtocolV25::PackOverVoltageConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write pack over voltage configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_cell_under_voltage_configuration_v25(PaceBmsProtocolV25::CellUnderVoltageConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write cell under voltage configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_pack_under_voltage_configuration_v25(PaceBmsProtocolV25::PackUnderVoltageConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write pack under voltage configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_charge_over_current_configuration_v25(PaceBmsProtocolV25::ChargeOverCurrentConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write charge over current configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_discharge_over_current1_configuration_v25(PaceBmsProtocolV25::DischargeOverCurrent1Configuration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write discharge over current 1 configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_discharge_over_current2_configuration_v25(PaceBmsProtocolV25::DischargeOverCurrent2Configuration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write discharge over current 2 configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_short_circuit_protection_configuration_v25(PaceBmsProtocolV25::ShortCircuitProtectionConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write short circuit protection configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_cell_balancing_configuration_v25(PaceBmsProtocolV25::CellBalancingConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write cell balancing configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_sleep_configuration_v25(PaceBmsProtocolV25::SleepConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write sleep configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_full_charge_low_charge_configuration_v25(PaceBmsProtocolV25::FullChargeLowChargeConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write full charge low charge configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_charge_and_discharge_over_temperature_configuration_v25(PaceBmsProtocolV25::ChargeAndDischargeOverTemperatureConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write charge and discharge over temperature configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_charge_and_discharge_under_temperature_configuration_v25(PaceBmsProtocolV25::ChargeAndDischargeUnderTemperatureConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write charge and discharge under temperature configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_mosfet_over_temperature_configuration_v25(PaceBmsProtocolV25::MosfetOverTemperatureConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write mosfet over temperature configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_environment_over_under_temperature_configuration_v25(PaceBmsProtocolV25::EnvironmentOverUnderTemperatureConfiguration& config) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write environment over under temperature configuration");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, config](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteConfigurationRequest(this->address_, config, request); };
+	item->process_response_frame_ = [this, config](std::span<uint8_t>& response) -> void { this->handle_write_configuration_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_system_datetime_v25(PaceBmsProtocolV25::DateTime& dt) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write system date/time");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, dt](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v25_->CreateWriteSystemDateTimeRequest(this->address_, dt, request); };
+	item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_write_system_datetime_response_v25(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+
+void PaceBmsMaster::write_shutdown_v20() {
+	command_item* item = new command_item;
+	ESP_LOGE(TAG, "SHUTTING DOWN");
+	item->description_ = std::string("write shutdown");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v20_->CreateWriteShutdownCommandRequest(this->address_, request); };
+	item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_write_shutdown_command_response_v20(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+void PaceBmsMaster::write_system_datetime_v20(PaceBmsProtocolV20::DateTime& dt) {
+	command_item* item = new command_item;
+
+	item->description_ = std::string("write system date/time");
+	ESP_LOGV(TAG, "Queueing write command '%s'", item->description_.c_str());
+	item->create_request_frame_ = [this, dt](std::vector<uint8_t>& request) -> bool { return this->pace_bms_v20_->CreateWriteSystemDateTimeRequest(this->address_, dt, request); };
+	item->process_response_frame_ = [this](std::span<uint8_t>& response) -> void { this->handle_write_system_datetime_response_v20(response); };
+	write_queue_push_back_with_deduplication(item);
+	ESP_LOGV(TAG, "Write commands queued: %i", (int)(write_queue_.size()));
+}
+
+}  // namespace pace_bms_master
+}  // namespace esphome
