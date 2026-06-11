@@ -1,0 +1,461 @@
+esphome:
+  name: "pace_bms"
+  friendly_name: pace_bms
+  min_version: 2026.4.0
+  name_add_mac_suffix: false
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+    advanced:
+      minimum_chip_revision: "3.1" 
+      sram1_as_iram: true
+
+# Enable logging
+logger:
+  level: INFO
+  baud_rate: 0
+  tx_buffer_size: 512
+  
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: false
+  reboot_timeout: 15min
+  power_save_mode: none
+
+web_server:
+  port: 80
+  version: 3
+  include_internal: False
+#  ota: False
+  local: True
+
+# Set pins required for LilyGo T-CAN485 board
+output:
+  - platform: gpio
+    id: ENABLE_PIN # Enable the chip
+    pin:
+      number: GPIO19
+      inverted: true
+
+  - platform: gpio
+    id: SE_PIN # Enable autodirection
+    pin:
+      number: GPIO17
+      inverted: true
+
+  - platform: gpio
+    id: ENABLE_5V_PIN # Enable 5V pin for RS485 chip
+    pin:
+      number: GPIO16
+      inverted: true
+
+# Configure UART
+uart:
+  id: uart_0
+  baud_rate: 9600
+  tx_pin: GPIO22
+  rx_pin: GPIO21
+  debug:
+    direction: BOTH
+    dummy_receiver: false
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/www0xx/balans-pace
+    components: [ pace_bms ]
+    refresh: 1s
+
+pace_bms:
+  - id: master_bms
+    address: 2
+    uart_id: uart_0
+#    flow_control_pin: GPIO18
+    update_interval: 10s
+    request_throttle: 50ms
+    response_timeout: 6000ms
+    protocol_commandset: 0x25
+    protocol_version: 0x20
+    type: MASTER
+    slave_query_mode: RELAY
+    rx_buffer_size: 2048
+
+
+  - id: slave_bms_3
+    address: 3
+    type: SLAVE
+    master_bms_id: master_bms
+
+  - id: slave_bms_4
+    address: 4
+    type: SLAVE
+    master_bms_id: master_bms
+    
+sensor:
+  - platform: pace_bms
+    pace_bms_id: master_bms
+    total_voltage:
+      name: "BMS1 Total Voltage"
+    current:
+      name: "BMS1 Current"
+    power:
+      name: "BMS1 Power"
+    state_of_charge:
+      name: "BMS1 SOC"
+    full_capacity:
+      name: "BMS1 Full Capacity"
+    min_cell_voltage:
+      name: "BMS1 Min Cell Voltage"
+    max_cell_voltage:
+      name: "BMS1 Max Cell Voltage"
+    avg_cell_voltage:
+      name: "BMS1 Avg Cell Voltage"
+    max_cell_differential:
+      name: "BMS1 Max Cell Differential"
+    temperature_01:
+      name: "BMS1 Temperatuur 1"
+    temperature_02:
+      name: "BMS1 Temperatuur 2"
+    temperature_03:
+      name: "BMS1 Temperatuur 3"
+    temperature_04:
+      name: "BMS1 Temperatuur 4"
+    temperature_05:
+      name: "BMS1 Environment Temperature"
+    cell_voltage_01:
+      name: "BMS1 Cel 01 Voltage"
+    cell_voltage_02:
+      name: "BMS1 Cel 02 Voltage"
+    cell_voltage_03:
+      name: "BMS1 Cel 03 Voltage"
+    cell_voltage_04:
+      name: "BMS1 Cel 04 Voltage"
+    cell_voltage_05:
+      name: "BMS1 Cel 05 Voltage"
+    cell_voltage_06:
+      name: "BMS1 Cel 06 Voltage"
+    cell_voltage_07:
+      name: "BMS1 Cel 07 Voltage"
+    cell_voltage_08:
+      name: "BMS1 Cel 08 Voltage"
+    cell_voltage_09:
+      name: "BMS1 Cel 09 Voltage"
+    cell_voltage_10:
+      name: "BMS1 Cel 10 Voltage"
+    cell_voltage_11:
+      name: "BMS1 Cel 11 Voltage"
+    cell_voltage_12:
+      name: "BMS1 Cel 12 Voltage"
+    cell_voltage_13:
+      name: "BMS1 Cel 13 Voltage"
+    cell_voltage_14:
+      name: "BMS1 Cel 14 Voltage"
+    cell_voltage_15:
+      name: "BMS1 Cel 15 Voltage"
+    cell_voltage_16:
+      name: "BMS1 Cel 16 Voltage"
+    system_status_value:
+      name: "BMS1 System Status Raw"
+    fault_status_value:
+      name: "BMS1 Fault Status Raw"
+    balancing_status_value:
+      name: "BMS1 Balancing Status Raw"
+      id: bms1_balance_raw
+    protection_status_value_1:
+      name: "BMS1 Protection1 Raw"
+    protection_status_value_2:
+      name: "BMS1 Protection2 Raw"
+
+  - platform: pace_bms
+    pace_bms_id: slave_bms_3
+    total_voltage:
+      name: "BMS2 Total Voltage"
+    current:
+      name: "BMS2 Current"
+    power:
+      name: "BMS2 Power"
+    state_of_charge:
+      name: "BMS2 SOC"
+    full_capacity:
+      name: "BMS2 Full Capacity"
+    min_cell_voltage:
+      name: "BMS2 Min Cell Voltage"
+    max_cell_voltage:
+      name: "BMS2 Max Cell Voltage"
+    avg_cell_voltage:
+      name: "BMS2 Avg Cell Voltage"
+    max_cell_differential:
+      name: "BMS2 Max Cell Differential"
+    temperature_01:
+      name: "BMS2 Temperatuur 1"
+    temperature_02:
+      name: "BMS2 Temperatuur 2"
+    temperature_03:
+      name: "BMS2 Temperatuur 3"
+    temperature_04:
+      name: "BMS2 Temperatuur 4"
+    temperature_05:
+      name: "BMS2 Environment Temperature"
+    cell_voltage_01:
+      name: "BMS2 Cel 01 Voltage"
+    cell_voltage_02:
+      name: "BMS2 Cel 02 Voltage"
+    cell_voltage_03:
+      name: "BMS2 Cel 03 Voltage"
+    cell_voltage_04:
+      name: "BMS2 Cel 04 Voltage"
+    cell_voltage_05:
+      name: "BMS2 Cel 05 Voltage"
+    cell_voltage_06:
+      name: "BMS2 Cel 06 Voltage"
+    cell_voltage_07:
+      name: "BMS2 Cel 07 Voltage"
+    cell_voltage_08:
+      name: "BMS2 Cel 08 Voltage"
+    cell_voltage_09:
+      name: "BMS2 Cel 09 Voltage"
+    cell_voltage_10:
+      name: "BMS2 Cel 10 Voltage"
+    cell_voltage_11:
+      name: "BMS2 Cel 11 Voltage"
+    cell_voltage_12:
+      name: "BMS2 Cel 12 Voltage"
+    cell_voltage_13:
+      name: "BMS2 Cel 13 Voltage"
+    cell_voltage_14:
+      name: "BMS2 Cel 14 Voltage"
+    cell_voltage_15:
+      name: "BMS2 Cel 15 Voltage"
+    cell_voltage_16:
+      name: "BMS2 Cel 16 Voltage"
+    system_status_value:
+      name: "BMS2 System Status Raw"
+    fault_status_value:
+      name: "BMS2 Fault Status Raw"
+    balancing_status_value:
+      name: "BMS2 Balancing Status Raw"
+      id: bms2_balance_raw
+    protection_status_value_1:
+      name: "BMS2 Protection1 Raw"
+    protection_status_value_2:
+      name: "BMS2 Protection2 Raw"
+
+  - platform: pace_bms
+    pace_bms_id: slave_bms_4
+    total_voltage:
+      name: "BMS3 Total Voltage"
+    current:
+      name: "BMS3 Current"
+    power:
+      name: "BMS3 Power"
+    state_of_charge:
+      name: "BMS3 SOC"
+    full_capacity:
+      name: "BMS3 Full Capacity"
+    min_cell_voltage:
+      name: "BMS3 Min Cell Voltage"
+    max_cell_voltage:
+      name: "BMS3 Max Cell Voltage"
+    avg_cell_voltage:
+      name: "BMS3 Avg Cell Voltage"
+    max_cell_differential:
+      name: "BMS3 Max Cell Differential"
+    temperature_01:
+      name: "BMS3 Temperatuur 1"
+    temperature_02:
+      name: "BMS3 Temperatuur 2"
+    temperature_03:
+      name: "BMS3 Temperatuur 3"
+    temperature_04:
+      name: "BMS3 Temperatuur 4"
+    temperature_05:
+      name: "BMS3 Environment Temperature"
+    cell_voltage_01:
+      name: "BMS3 Cel 01 Voltage"
+    cell_voltage_02:
+      name: "BMS3 Cel 02 Voltage"
+    cell_voltage_03:
+      name: "BMS3 Cel 03 Voltage"
+    cell_voltage_04:
+      name: "BMS3 Cel 04 Voltage"
+    cell_voltage_05:
+      name: "BMS3 Cel 05 Voltage"
+    cell_voltage_06:
+      name: "BMS3 Cel 06 Voltage"
+    cell_voltage_07:
+      name: "BMS3 Cel 07 Voltage"
+    cell_voltage_08:
+      name: "BMS3 Cel 08 Voltage"
+    cell_voltage_09:
+      name: "BMS3 Cel 09 Voltage"
+    cell_voltage_10:
+      name: "BMS3 Cel 10 Voltage"
+    cell_voltage_11:
+      name: "BMS3 Cel 11 Voltage"
+    cell_voltage_12:
+      name: "BMS3 Cel 12 Voltage"
+    cell_voltage_13:
+      name: "BMS3 Cel 13 Voltage"
+    cell_voltage_14:
+      name: "BMS3 Cel 14 Voltage"
+    cell_voltage_15:
+      name: "BMS3 Cel 15 Voltage"
+    cell_voltage_16:
+      name: "BMS3 Cel 16 Voltage"
+    system_status_value:
+      name: "BMS3 System Status Raw"
+    fault_status_value:
+      name: "BMS3 Fault Status Raw"
+    balancing_status_value:
+      name: "BMS3 Balancing Status Raw"
+      id: bms3_balance_raw
+    protection_status_value_1:
+      name: "BMS3 Protection1 Raw"
+    protection_status_value_2:
+      name: "BMS3 Protection2 Raw"
+
+text_sensor:
+  - platform: pace_bms
+    pace_bms_id: master_bms
+#    raw_status:
+#      name: "BMS1 Raw Status"
+    warning_status:
+      name: "BMS1 Warning Status"
+    protection_status:
+      name: "BMS1 Protection Status"
+    fault_status:
+      name: "BMS1 Fault Status"
+    system_status:
+      name: "BMS1 System Status"
+      filters:
+        - lambda: |
+            std::string out = x;
+            for (auto& token : {"DFET On; ", "CFET On; ", "DFET On", "CFET On"}) {
+              auto pos = out.find(token);
+              if (pos != std::string::npos) out.erase(pos, strlen(token));
+            }
+            while (out.size() >= 2 && out.substr(out.size()-2) == "; ")
+              out.erase(out.size()-2);
+            return out;
+    balancing_status:
+      name: "BMS1 Balancing Status"
+    configuration_status:
+      name: "BMS1 Configuration Status"
+
+  - platform: pace_bms
+    pace_bms_id: slave_bms_3
+#    raw_status:
+#      name: "BMS2 Raw Status"
+    warning_status:
+      name: "BMS2 Warning Status"
+    protection_status:
+      name: "BMS2 Protection Status"
+    fault_status:
+      name: "BMS2 Fault Status"
+    system_status:
+      name: "BMS2 System Status"
+      filters:
+        - lambda: |
+            std::string out = x;
+            for (auto& token : {"DFET On; ", "CFET On; ", "DFET On", "CFET On"}) {
+              auto pos = out.find(token);
+              if (pos != std::string::npos) out.erase(pos, strlen(token));
+            }
+            while (out.size() >= 2 && out.substr(out.size()-2) == "; ")
+              out.erase(out.size()-2);
+            return out;
+    balancing_status:
+      name: "BMS2 Balancing Status"
+    configuration_status:
+      name: "BMS2 Configuration Status"
+
+  - platform: pace_bms
+    pace_bms_id: slave_bms_4
+#    raw_status:
+#      name: "BMS3 Raw Status"
+    warning_status:
+      name: "BMS3 Warning Status"
+    protection_status:
+      name: "BMS3 Protection Status"
+    fault_status:
+      name: "BMS3 Fault Status"
+    system_status:
+      name: "BMS3 System Status"
+      filters:
+        - lambda: |
+            std::string out = x;
+            for (auto& token : {"DFET On; ", "CFET On; ", "DFET On", "CFET On"}) {
+              auto pos = out.find(token);
+              if (pos != std::string::npos) out.erase(pos, strlen(token));
+            }
+            while (out.size() >= 2 && out.substr(out.size()-2) == "; ")
+              out.erase(out.size()-2);
+            return out;
+    balancing_status:
+      name: "BMS3 Balancing Status"
+    configuration_status:
+      name: "BMS3 Configuration Status"
+
+  - platform: template
+    name: "BMS1 Balancing Cells"
+    update_interval: 5s
+    lambda: |-
+      uint16_t bal = (uint16_t) id(bms1_balance_raw).state;
+      if (bal == 0) return {"Balancing: geen"};
+      std::string out = "Balancing: cellen ";
+      bool first = true;
+      for (int i = 0; i < 16; i++) {
+        if (bal & (1 << i)) {
+          if (!first) out += ", ";
+          out += std::to_string(i + 1);
+          first = false;
+        }
+      }
+      return {out};
+
+  - platform: template
+    name: "BMS2 Balancing Cells"
+    update_interval: 5s
+    lambda: |-
+      uint16_t bal = (uint16_t) id(bms2_balance_raw).state;
+      if (bal == 0) return {"Balancing: geen"};
+      std::string out = "Balancing: cellen ";
+      bool first = true;
+      for (int i = 0; i < 16; i++) {
+        if (bal & (1 << i)) {
+          if (!first) out += ", ";
+          out += std::to_string(i + 1);
+          first = false;
+        }
+      }
+      return {out};
+
+  - platform: template
+    name: "BMS3 Balancing Cells"
+    update_interval: 5s
+    lambda: |-
+      uint16_t bal = (uint16_t) id(bms3_balance_raw).state;
+      if (bal == 0) return {"Balancing: geen"};
+      std::string out = "Balancing: cellen ";
+      bool first = true;
+      for (int i = 0; i < 16; i++) {
+        if (bal & (1 << i)) {
+          if (!first) out += ", ";
+          out += std::to_string(i + 1);
+          first = false;
+        }
+      }
+      return {out};    
+    
