@@ -1,575 +1,687 @@
 title: Batterij Monitor
 views:
-  - title: BMS Overzicht
-    icon: mdi:battery-charging
-    type: panel
-    cards:
-      - type: vertical-stack
+  - type: sections
+    max_columns: 3
+    title: BMS Overzicht
+    path: bms-overzicht
+    sections:
+      - type: grid
         cards:
-          - type: horizontal-stack
-            cards:
-              - type: custom:mushroom-template-card
-                primary: Batterijsysteem
-                secondary: >
-                  {% set s1 = states('sensor.pace_bms_bms1_soc') | float(0) %}
-                  {% set s2 = states('sensor.pace_bms_bms2_soc') | float(0) %}
-                  {% set s3 = states('sensor.pace_bms_bms3_soc') | float(0) %}
-                  Gemiddeld SOC: {{ ((s1 + s2 + s3) / 3) | round(1) }}%
-                icon: >
-                  {% set gem = ((states('sensor.pace_bms_bms1_soc') | float(0)
-                               + states('sensor.pace_bms_bms2_soc') | float(0)
-                               + states('sensor.pace_bms_bms3_soc') | float(0)) / 3) %}
-                  {% if gem > 80 %}mdi:battery {% elif gem > 60 %}mdi:battery-80
-                  {% elif gem > 40 %}mdi:battery-60 {% elif gem > 20
-                  %}mdi:battery-40 {% else %}mdi:battery-alert{% endif %}
-                badge_icon: >
-                  {% set f1 = states('sensor.pace_bms_bms1_fault_status') %} {%
-                  set f2 = states('sensor.pace_bms_bms2_fault_status') %} {% set
-                  f3 = states('sensor.pace_bms_bms3_fault_status') %} {% if (f1
-                  not in ['', 'unavailable', 'unknown', 'none']) or
-                        (f2 not in ['', 'unavailable', 'unknown', 'none']) or
-                        (f3 not in ['', 'unavailable', 'unknown', 'none']) %}
-                    mdi:alert-circle{% endif %}
-                badge_color: red
-                color: |-
-                  {% set gem = (
-                    (
-                      states('sensor.pace_bms_bms1_soc') | float(0) +
-                      states('sensor.pace_bms_bms2_soc') | float(0) +
-                      states('sensor.pace_bms_bms3_soc') | float(0)
-                    ) / 3
-                  ) %}
-                  {% if gem >= 74.9 %}
-                    green
-                  {% elif gem >= 50 %}
-                    amber
-                  {% elif gem >= 30 %}
-                    orange
-                  {% else %}
-                    red
-                  {% endif %}
-                features_position: bottom
-              - type: custom:mushroom-template-card
-                primary: Totaal vermogen
-                secondary: >
-                  {% set p1 = states('sensor.pace_bms_bms1_power') | float(0) %}
-                  {% set p2 = states('sensor.pace_bms_bms2_power') | float(0) %}
-                  {% set p3 = states('sensor.pace_bms_bms3_power') | float(0) %}
-                  {{ (p1 + p2 + p3) | round(0) }} W
-                icon: mdi:lightning-bolt
-                icon_color: >
-                  {% set p = states('sensor.pace_bms_bms1_power') | float(0)
-                           + states('sensor.pace_bms_bms2_power') | float(0)
-                           + states('sensor.pace_bms_bms3_power') | float(0) %}
-                  {% if p > 0 %}green{% elif p < 0 %}orange{% else %}grey{%
-                  endif %}
-          - type: horizontal-stack
-            cards:
-              - type: custom:mushroom-template-card
-                primary: ACCU 1 (master)
-                secondary: >-
-                  {{ states('sensor.pace_bms_bms1_soc') | float(0) | round(1)
-                  }}% ·
+          - type: custom:mushroom-template-card
+            primary: Batterijsysteem
+            secondary: >
+              {% set s1 = states('sensor.pace_bms_bms1_soc') | float(0) %} {%
+              set s2 = states('sensor.pace_bms_bms2_soc') | float(0) %} {% set
+              s3 = states('sensor.pace_bms_bms3_soc') | float(0) %} Gemiddeld
+              SOC: {{ ((s1 + s2 + s3) / 3) | round(1) }}%
+            icon: >
+              {% set gem = ((states('sensor.pace_bms_bms1_soc') | float(0)
+                           + states('sensor.pace_bms_bms2_soc') | float(0)
+                           + states('sensor.pace_bms_bms3_soc') | float(0)) / 3) %}
+              {% if gem > 80 %}mdi:battery {% elif gem > 60 %}mdi:battery-80 {%
+              elif gem > 40 %}mdi:battery-60 {% elif gem > 20 %}mdi:battery-40
+              {% else %}mdi:battery-alert{% endif %}
+            badge_icon: >
+              {% set f1 = states('sensor.pace_bms_bms1_fault_status') %} {% set
+              f2 = states('sensor.pace_bms_bms2_fault_status') %} {% set f3 =
+              states('sensor.pace_bms_bms3_fault_status') %} {% if (f1 not in
+              ['', 'unavailable', 'unknown', 'none']) or
+                    (f2 not in ['', 'unavailable', 'unknown', 'none']) or
+                    (f3 not in ['', 'unavailable', 'unknown', 'none']) %}
+                mdi:alert-circle{% endif %}
+            badge_color: red
+            color: |-
+              {% set gem = (
+                (
+                  states('sensor.pace_bms_bms1_soc') | float(0) +
+                  states('sensor.pace_bms_bms2_soc') | float(0) +
+                  states('sensor.pace_bms_bms3_soc') | float(0)
+                ) / 3
+              ) %}
+              {% if gem >= 74.9 %}
+                green
+              {% elif gem >= 50 %}
+                amber
+              {% elif gem >= 30 %}
+                orange
+              {% else %}
+                red
+              {% endif %}
+            features_position: bottom
+            grid_options:
+              columns: 18
+              rows: 1
+            visibility:
+              - condition: screen
+                media_query: "(min-width: 1280px)"
+          - type: custom:mushroom-template-card
+            primary: Totaal vermogen
+            secondary: >
+              {% set p1 = states('sensor.pace_bms_bms1_power') | float(0) %} {%
+              set p2 = states('sensor.pace_bms_bms2_power') | float(0) %} {% set
+              p3 = states('sensor.pace_bms_bms3_power') | float(0) %} {{ (p1 +
+              p2 + p3) | round(0) }} W
+            icon: mdi:lightning-bolt
+            icon_color: |
+              {% set p = states('sensor.pace_bms_bms1_power') | float(0)
+                       + states('sensor.pace_bms_bms2_power') | float(0)
+                       + states('sensor.pace_bms_bms3_power') | float(0) %}
+              {% if p > 0 %}green{% elif p < 0 %}orange{% else %}grey{% endif %}
+            grid_options:
+              columns: 18
+              rows: 1
+            visibility:
+              - condition: screen
+                media_query: "(min-width: 1280px)"
+        column_span: 3
+        visibility:
+          - condition: screen
+            media_query: "(min-width: 1280px)"
+      - type: grid
+        cards:
+          - type: custom:mushroom-template-card
+            primary: Batterijsysteem
+            secondary: >
+              {% set s1 = states('sensor.pace_bms_bms1_soc') | float(0) %} {%
+              set s2 = states('sensor.pace_bms_bms2_soc') | float(0) %} {% set
+              s3 = states('sensor.pace_bms_bms3_soc') | float(0) %} Gemiddeld
+              SOC: {{ ((s1 + s2 + s3) / 3) | round(1) }}%
+            icon: >
+              {% set gem = ((states('sensor.pace_bms_bms1_soc') | float(0)
+                           + states('sensor.pace_bms_bms2_soc') | float(0)
+                           + states('sensor.pace_bms_bms3_soc') | float(0)) / 3) %}
+              {% if gem > 80 %}mdi:battery {% elif gem > 60 %}mdi:battery-80 {%
+              elif gem > 40 %}mdi:battery-60 {% elif gem > 20 %}mdi:battery-40
+              {% else %}mdi:battery-alert{% endif %}
+            badge_icon: >
+              {% set f1 = states('sensor.pace_bms_bms1_fault_status') %} {% set
+              f2 = states('sensor.pace_bms_bms2_fault_status') %} {% set f3 =
+              states('sensor.pace_bms_bms3_fault_status') %} {% if (f1 not in
+              ['', 'unavailable', 'unknown', 'none']) or
+                    (f2 not in ['', 'unavailable', 'unknown', 'none']) or
+                    (f3 not in ['', 'unavailable', 'unknown', 'none']) %}
+                mdi:alert-circle{% endif %}
+            badge_color: red
+            color: |-
+              {% set gem = (
+                (
+                  states('sensor.pace_bms_bms1_soc') | float(0) +
+                  states('sensor.pace_bms_bms2_soc') | float(0) +
+                  states('sensor.pace_bms_bms3_soc') | float(0)
+                ) / 3
+              ) %}
+              {% if gem >= 74.9 %}
+                green
+              {% elif gem >= 50 %}
+                amber
+              {% elif gem >= 30 %}
+                orange
+              {% else %}
+                red
+              {% endif %}
+            features_position: bottom
+            grid_options:
+              columns: 12
+              rows: 1
+            visibility:
+              - condition: screen
+                media_query: "(min-width: 0px) and (max-width: 1279px)"
+        visibility:
+          - condition: screen
+            media_query: "(min-width: 0px) and (max-width: 1279px)"
+      - type: grid
+        cards:
+          - type: custom:mushroom-template-card
+            primary: Totaal vermogen
+            secondary: >
+              {% set p1 = states('sensor.pace_bms_bms1_power') | float(0) %} {%
+              set p2 = states('sensor.pace_bms_bms2_power') | float(0) %} {% set
+              p3 = states('sensor.pace_bms_bms3_power') | float(0) %} {{ (p1 +
+              p2 + p3) | round(0) }} W
+            icon: mdi:lightning-bolt
+            icon_color: |
+              {% set p = states('sensor.pace_bms_bms1_power') | float(0)
+                       + states('sensor.pace_bms_bms2_power') | float(0)
+                       + states('sensor.pace_bms_bms3_power') | float(0) %}
+              {% if p > 0 %}green{% elif p < 0 %}orange{% else %}grey{% endif %}
+            grid_options:
+              columns: 12
+              rows: 1
+            visibility:
+              - condition: screen
+                media_query: "(min-width: 0px) and (max-width: 1279px)"
+        visibility:
+          - condition: screen
+            media_query: "(min-width: 0px) and (max-width: 1279px)"
+      - type: grid
+        cards: []
+        visibility:
+          - condition: screen
+            media_query: ""
+      - type: grid
+        cards:
+          - type: custom:mushroom-template-card
+            primary: ACCU 1 (master)
+            secondary: >-
+              {{ states('sensor.pace_bms_bms1_soc') | float(0) | round(1) }}% ·
 
-                  {{ states('sensor.pace_bms_bms1_environment_temperature') |
-                  float(0) | round(1) }}°C ·
+              {{ states('sensor.pace_bms_bms1_environment_temperature') |
+              float(0) | round(1) }}°C ·
 
-                  {{ states('sensor.pace_bms_bms1_system_status') }}
-                icon: |-
-                  {% set soc = states('sensor.pace_bms_bms1_soc') | float(0) %}
-                  {% if soc >= 95 %}
-                    mdi:battery
-                  {% elif soc >= 85 %}
-                    mdi:battery-90
-                  {% elif soc >= 75 %}
-                    mdi:battery-80
-                  {% elif soc >= 65 %}
-                    mdi:battery-70
-                  {% elif soc >= 55 %}
-                    mdi:battery-60
-                  {% elif soc >= 45 %}
-                    mdi:battery-50
-                  {% elif soc >= 35 %}
-                    mdi:battery-40
-                  {% elif soc >= 25 %}
-                    mdi:battery-30
-                  {% elif soc >= 15 %}
-                    mdi:battery-20
-                  {% elif soc >= 5 %}
-                    mdi:battery-10
-                  {% else %}
-                    mdi:battery-alert
-                  {% endif %}
-                badge_icon: >
-                  {% set f = states('sensor.pace_bms_bms1_fault_status') %} {%
-                  if f not in ['', 'unavailable', 'unknown', 'none']
-                  %}mdi:alert{% endif %}
-                badge_color: red
-                color: |-
-                  {% set soc = states('sensor.pace_bms_bms1_soc') | float(0) %}
-                  {% if soc >= 75 %}
-                    green
-                  {% elif soc >= 50 %}
-                    amber
-                  {% elif soc >= 30 %}
-                    orange
-                  {% else %}
-                    red
-                  {% endif %}
-                features_position: bottom
-              - type: custom:mushroom-template-card
-                primary: ACCU 2
-                secondary: >-
-                  {{ states('sensor.pace_bms_bms2_soc') | round(1) }}% · {{
-                  states('sensor.pace_bms_bms2_environment_temperature') |
-                  round(1) }}°C · 
+              {{ states('sensor.pace_bms_bms1_system_status') }}
+            icon: |-
+              {% set soc = states('sensor.pace_bms_bms1_soc') | float(0) %}
+              {% if soc >= 95 %}
+                mdi:battery
+              {% elif soc >= 85 %}
+                mdi:battery-90
+              {% elif soc >= 75 %}
+                mdi:battery-80
+              {% elif soc >= 65 %}
+                mdi:battery-70
+              {% elif soc >= 55 %}
+                mdi:battery-60
+              {% elif soc >= 45 %}
+                mdi:battery-50
+              {% elif soc >= 35 %}
+                mdi:battery-40
+              {% elif soc >= 25 %}
+                mdi:battery-30
+              {% elif soc >= 15 %}
+                mdi:battery-20
+              {% elif soc >= 5 %}
+                mdi:battery-10
+              {% else %}
+                mdi:battery-alert
+              {% endif %}
+            badge_icon: >
+              {% set f = states('sensor.pace_bms_bms1_fault_status') %} {% if f
+              not in ['', 'unavailable', 'unknown', 'none'] %}mdi:alert{% endif
+              %}
+            badge_color: red
+            color: |-
+              {% set soc = states('sensor.pace_bms_bms1_soc') | float(0) %}
+              {% if soc >= 75 %}
+                green
+              {% elif soc >= 50 %}
+                amber
+              {% elif soc >= 30 %}
+                orange
+              {% else %}
+                red
+              {% endif %}
+            features_position: bottom
+            grid_options:
+              columns: 12
+              rows: 1
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: SOC
+              show_states: true
+              colorize_states: true
+            graph_span: 2h
+            apex_config:
+              chart:
+                height: 220
+                toolbar:
+                  show: false
+              yaxis:
+                forceNiceScale: true
+              legend:
+                show: false
+              tooltip:
+                shared: true
+                intersect: false
+                "y":
+                  formatter: function(value) { return value.toFixed(1) + ' %'; }
+              xaxis:
+                tooltip:
+                  enabled: false
+            series:
+              - entity: sensor.pace_bms_bms1_soc
+                name: BMS 1
+                color: "#4CAF50"
+                stroke_width: 0
+                float_precision: 1
+                show:
+                  in_chart: false
+                  in_header: true
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms1_soc
+                name: BMS 1
+                color: "#4CAF50"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 1
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 1min
+                  fill: last
+              - entity: sensor.pace_bms_bms2_soc
+                name: BMS 2
+                color: "#2196F3"
+                stroke_width: 0
+                float_precision: 1
+                show:
+                  in_chart: false
+                  in_header: true
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms2_soc
+                name: BMS 2
+                color: "#2196F3"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 1
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 1min
+                  fill: last
+              - entity: sensor.pace_bms_bms3_soc
+                name: BMS 3
+                color: "#FF9800"
+                stroke_width: 0
+                float_precision: 1
+                show:
+                  in_chart: false
+                  in_header: true
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms3_soc
+                name: BMS 3
+                color: "#FF9800"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 1
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 1min
+                  fill: last
+        column_span: 1
+      - type: grid
+        cards:
+          - type: custom:mushroom-template-card
+            primary: ACCU 2
+            secondary: >-
+              {{ states('sensor.pace_bms_bms2_soc') | round(1) }}% · {{
+              states('sensor.pace_bms_bms2_environment_temperature') | round(1)
+              }}°C · 
 
-                  {{ states('sensor.pace_bms_bms2_system_status') }}
-                icon: |-
-                  {% set soc = states('sensor.pace_bms_bms2_soc') | float(0) %}
-                  {% if soc >= 95 %}
-                    mdi:battery
-                  {% elif soc >= 85 %}
-                    mdi:battery-90
-                  {% elif soc >= 75 %}
-                    mdi:battery-80
-                  {% elif soc >= 65 %}
-                    mdi:battery-70
-                  {% elif soc >= 55 %}
-                    mdi:battery-60
-                  {% elif soc >= 45 %}
-                    mdi:battery-50
-                  {% elif soc >= 35 %}
-                    mdi:battery-40
-                  {% elif soc >= 25 %}
-                    mdi:battery-30
-                  {% elif soc >= 15 %}
-                    mdi:battery-20
-                  {% elif soc >= 5 %}
-                    mdi:battery-10
-                  {% else %}
-                    mdi:battery-alert
-                  {% endif %}
-                badge_icon: >
-                  {% set f = states('sensor.pace_bms_bms2_fault_status') %} {%
-                  if f not in ['', 'unavailable', 'unknown', 'none']
-                  %}mdi:alert{% endif %}
-                badge_color: red
-                color: |-
-                  {% set soc = states('sensor.pace_bms_bms2_soc') | float(0) %}
-                  {% if soc >= 75 %}
-                    green
-                  {% elif soc >= 50 %}
-                    amber
-                  {% elif soc >= 30 %}
-                    orange
-                  {% else %}
-                    red
-                  {% endif %}
-                features_position: bottom
-              - type: custom:mushroom-template-card
-                primary: ACCU 3
-                secondary: >-
-                  {{ states('sensor.pace_bms_bms3_soc') | float(0) | round(1)
-                  }}% · {{
-                  states('sensor.pace_bms_bms3_environment_temperature') |
-                  round(1) }}°C · 
+              {{ states('sensor.pace_bms_bms2_system_status') }}
+            icon: |-
+              {% set soc = states('sensor.pace_bms_bms2_soc') | float(0) %}
+              {% if soc >= 95 %}
+                mdi:battery
+              {% elif soc >= 85 %}
+                mdi:battery-90
+              {% elif soc >= 75 %}
+                mdi:battery-80
+              {% elif soc >= 65 %}
+                mdi:battery-70
+              {% elif soc >= 55 %}
+                mdi:battery-60
+              {% elif soc >= 45 %}
+                mdi:battery-50
+              {% elif soc >= 35 %}
+                mdi:battery-40
+              {% elif soc >= 25 %}
+                mdi:battery-30
+              {% elif soc >= 15 %}
+                mdi:battery-20
+              {% elif soc >= 5 %}
+                mdi:battery-10
+              {% else %}
+                mdi:battery-alert
+              {% endif %}
+            badge_icon: >
+              {% set f = states('sensor.pace_bms_bms2_fault_status') %} {% if f
+              not in ['', 'unavailable', 'unknown', 'none'] %}mdi:alert{% endif
+              %}
+            badge_color: red
+            color: |-
+              {% set soc = states('sensor.pace_bms_bms2_soc') | float(0) %}
+              {% if soc >= 75 %}
+                green
+              {% elif soc >= 50 %}
+                amber
+              {% elif soc >= 30 %}
+                orange
+              {% else %}
+                red
+              {% endif %}
+            features_position: bottom
+            grid_options:
+              columns: 12
+              rows: 1
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Stroom
+              show_states: true
+              colorize_states: true
+            graph_span: 2h
+            apex_config:
+              chart:
+                height: 220
+                toolbar:
+                  show: false
+              yaxis:
+                forceNiceScale: true
+              legend:
+                show: false
+              tooltip:
+                shared: true
+                intersect: false
+                "y":
+                  formatter: function(value) { return value.toFixed(1) + ' A'; }
+              xaxis:
+                tooltip:
+                  enabled: false
+            series:
+              - entity: sensor.pace_bms_bms1_current
+                name: BMS 1
+                color: "#4CAF50"
+                stroke_width: 0
+                float_precision: 1
+                show:
+                  in_chart: false
+                  in_header: raw
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms1_current
+                name: BMS 1
+                color: "#4CAF50"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 1
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 30sec
+                  fill: last
+              - entity: sensor.pace_bms_bms2_current
+                name: BMS 2
+                color: "#2196F3"
+                stroke_width: 0
+                float_precision: 1
+                show:
+                  in_chart: false
+                  in_header: raw
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms2_current
+                name: BMS 2
+                color: "#2196F3"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 1
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 30sec
+                  fill: last
+              - entity: sensor.pace_bms_bms3_current
+                name: BMS 3
+                color: "#FF9800"
+                stroke_width: 0
+                float_precision: 1
+                show:
+                  in_chart: false
+                  in_header: raw
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms3_current
+                name: BMS 3
+                color: "#FF9800"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 1
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 30sec
+                  fill: last
+      - type: grid
+        cards:
+          - type: custom:mushroom-template-card
+            primary: ACCU 3
+            secondary: >-
+              {{ states('sensor.pace_bms_bms3_soc') | float(0) | round(1) }}% ·
+              {{ states('sensor.pace_bms_bms3_environment_temperature') |
+              round(1) }}°C · 
 
-                  {{ states('sensor.pace_bms_bms3_system_status') }}
-                icon: |-
-                  {% set soc = states('sensor.pace_bms_bms3_soc') | float(0) %}
-                  {% if soc >= 95 %}
-                    mdi:battery
-                  {% elif soc >= 85 %}
-                    mdi:battery-90
-                  {% elif soc >= 75 %}
-                    mdi:battery-80
-                  {% elif soc >= 65 %}
-                    mdi:battery-70
-                  {% elif soc >= 55 %}
-                    mdi:battery-60
-                  {% elif soc >= 45 %}
-                    mdi:battery-50
-                  {% elif soc >= 35 %}
-                    mdi:battery-40
-                  {% elif soc >= 25 %}
-                    mdi:battery-30
-                  {% elif soc >= 15 %}
-                    mdi:battery-20
-                  {% elif soc >= 5 %}
-                    mdi:battery-10
-                  {% else %}
-                    mdi:battery-alert
-                  {% endif %}
-                badge_icon: >
-                  {% set f = states('sensor.pace_bms_bms3_fault_status') %} {%
-                  if f not in ['', 'unavailable', 'unknown', 'none']
-                  %}mdi:alert{% endif %}
-                badge_color: red
-                color: |-
-                  {% set soc = states('sensor.pace_bms_bms3_soc') | float(0) %}
-                  {% if soc >= 75 %}
-                    green
-                  {% elif soc >= 50 %}
-                    amber
-                  {% elif soc >= 30 %}
-                    orange
-                  {% else %}
-                    red
-                  {% endif %}
-                features_position: bottom
-          - type: horizontal-stack
-            cards:
-              - type: custom:apexcharts-card
-                header:
-                  show: true
-                  title: SOC
-                  show_states: true
-                  colorize_states: true
-                graph_span: 2h
-                apex_config:
-                  chart:
-                    height: 220
-                    toolbar:
-                      show: false
-                  yaxis:
-                    forceNiceScale: true
-                  legend:
-                    show: false
-                  tooltip:
-                    shared: true
-                    intersect: false
-                    'y':
-                      formatter: function(value) { return value.toFixed(1) + ' %'; }
-                  xaxis:
-                    tooltip:
-                      enabled: false
-                series:
-                  - entity: sensor.pace_bms_bms1_soc
-                    name: BMS 1
-                    color: '#4CAF50'
-                    stroke_width: 0
-                    float_precision: 1
-                    show:
-                      in_chart: false
-                      in_header: true
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms1_soc
-                    name: BMS 1
-                    color: '#4CAF50'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 1
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 1min
-                      fill: last
-                  - entity: sensor.pace_bms_bms2_soc
-                    name: BMS 2
-                    color: '#2196F3'
-                    stroke_width: 0
-                    float_precision: 1
-                    show:
-                      in_chart: false
-                      in_header: true
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms2_soc
-                    name: BMS 2
-                    color: '#2196F3'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 1
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 1min
-                      fill: last
-                  - entity: sensor.pace_bms_bms3_soc
-                    name: BMS 3
-                    color: '#FF9800'
-                    stroke_width: 0
-                    float_precision: 1
-                    show:
-                      in_chart: false
-                      in_header: true
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms3_soc
-                    name: BMS 3
-                    color: '#FF9800'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 1
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 1min
-                      fill: last
-              - type: custom:apexcharts-card
-                header:
-                  show: true
-                  title: Stroom
-                  show_states: true
-                  colorize_states: true
-                graph_span: 2h
-                apex_config:
-                  chart:
-                    height: 220
-                    toolbar:
-                      show: false
-                  yaxis:
-                    forceNiceScale: true
-                  legend:
-                    show: false
-                  tooltip:
-                    shared: true
-                    intersect: false
-                    'y':
-                      formatter: function(value) { return value.toFixed(1) + ' A'; }
-                  xaxis:
-                    tooltip:
-                      enabled: false
-                series:
-                  - entity: sensor.pace_bms_bms1_current
-                    name: BMS 1
-                    color: '#4CAF50'
-                    stroke_width: 0
-                    float_precision: 1
-                    show:
-                      in_chart: false
-                      in_header: raw
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms1_current
-                    name: BMS 1
-                    color: '#4CAF50'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 1
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 30sec
-                      fill: last
-                  - entity: sensor.pace_bms_bms2_current
-                    name: BMS 2
-                    color: '#2196F3'
-                    stroke_width: 0
-                    float_precision: 1
-                    show:
-                      in_chart: false
-                      in_header: raw
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms2_current
-                    name: BMS 2
-                    color: '#2196F3'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 1
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 30sec
-                      fill: last
-                  - entity: sensor.pace_bms_bms3_current
-                    name: BMS 3
-                    color: '#FF9800'
-                    stroke_width: 0
-                    float_precision: 1
-                    show:
-                      in_chart: false
-                      in_header: raw
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms3_current
-                    name: BMS 3
-                    color: '#FF9800'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 1
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 30sec
-                      fill: last
-              - type: custom:apexcharts-card
-                header:
-                  show: true
-                  title: Spanning
-                  show_states: true
-                  colorize_states: true
-                graph_span: 2h
-                apex_config:
-                  chart:
-                    height: 220
-                    toolbar:
-                      show: false
-                  yaxis:
-                    forceNiceScale: true
-                  legend:
-                    show: false
-                  tooltip:
-                    shared: true
-                    intersect: false
-                    'y':
-                      formatter: function(value) { return value.toFixed(2) + ' V'; }
-                  xaxis:
-                    tooltip:
-                      enabled: false
-                series:
-                  - entity: sensor.pace_bms_bms1_total_voltage
-                    name: BMS 1
-                    color: '#4CAF50'
-                    stroke_width: 0
-                    float_precision: 2
-                    show:
-                      in_chart: false
-                      in_header: raw
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms1_total_voltage
-                    name: BMS 1
-                    color: '#4CAF50'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 2
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 1min
-                      fill: last
-                  - entity: sensor.pace_bms_bms2_total_voltage
-                    name: BMS 2
-                    color: '#2196F3'
-                    stroke_width: 0
-                    float_precision: 2
-                    show:
-                      in_chart: false
-                      in_header: raw
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms2_total_voltage
-                    name: BMS 2
-                    color: '#2196F3'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 2
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 1min
-                      fill: last
-                  - entity: sensor.pace_bms_bms3_total_voltage
-                    name: BMS 3
-                    color: '#FF9800'
-                    stroke_width: 0
-                    float_precision: 2
-                    show:
-                      in_chart: false
-                      in_header: raw
-                      name_in_header: true
-                  - entity: sensor.pace_bms_bms3_total_voltage
-                    name: BMS 3
-                    color: '#FF9800'
-                    stroke_width: 1
-                    curve: smooth
-                    float_precision: 2
-                    show:
-                      in_header: false
-                    group_by:
-                      func: avg
-                      duration: 1min
-                      fill: last
-          - type: horizontal-stack
-            cards:
-              - type: entities
-                title: BMS 1 — Detail
-                show_header_toggle: false
-                entities:
-                  - entity: sensor.pace_bms_bms1_soc
-                    name: SOC
-                    icon: mdi:battery-medium
-                  - entity: sensor.pace_bms_bms1_total_voltage
-                    name: Spanning
-                  - entity: sensor.pace_bms_bms1_current
-                    name: Stroom
-                  - entity: sensor.pace_bms_bms1_power
-                    name: Vermogen
-                  - entity: sensor.pace_bms_bms1_environment_temperature
-                    name: Temperatuur
-                  - entity: sensor.pace_bms_bms1_min_cell_voltage
-                    name: Min celspanning
-                  - entity: sensor.pace_bms_bms1_max_cell_voltage
-                    name: Max celspanning
-                  - entity: sensor.pace_bms_bms1_max_cell_differential
-                    name: Cel delta
-                  - entity: sensor.pace_bms_bms1_full_capacity
-                    name: Capaciteit
-                  - entity: sensor.pace_bms_bms1_warning_status
-                    name: Warning
-                  - entity: sensor.pace_bms_bms1_fault_status
-                    name: Fault
-                  - entity: sensor.pace_bms_bms1_balancing_status
-                    name: Balancing
-              - type: entities
-                title: BMS 2 — Detail
-                show_header_toggle: false
-                entities:
-                  - entity: sensor.pace_bms_bms2_soc
-                    name: SOC
-                    icon: mdi:battery-medium
-                  - entity: sensor.pace_bms_bms2_total_voltage
-                    name: Spanning
-                  - entity: sensor.pace_bms_bms2_current
-                    name: Stroom
-                  - entity: sensor.pace_bms_bms2_power
-                    name: Vermogen
-                  - entity: sensor.pace_bms_bms2_environment_temperature
-                    name: Temperatuur
-                  - entity: sensor.pace_bms_bms2_min_cell_voltage
-                    name: Min celspanning
-                  - entity: sensor.pace_bms_bms2_max_cell_voltage
-                    name: Max celspanning
-                  - entity: sensor.pace_bms_bms2_max_cell_differential
-                    name: Cel delta
-                  - entity: sensor.pace_bms_bms2_full_capacity
-                    name: Capaciteit
-                  - entity: sensor.pace_bms_bms2_warning_status
-                    name: Warning
-                  - entity: sensor.pace_bms_bms2_fault_status
-                    name: Fault
-                  - entity: sensor.pace_bms_bms2_balancing_status
-                    name: Balancing
-              - type: entities
-                title: BMS 3 — Detail
-                show_header_toggle: false
-                entities:
-                  - entity: sensor.pace_bms_bms3_soc
-                    name: SOC
-                    icon: mdi:battery-medium
-                  - entity: sensor.pace_bms_bms3_total_voltage
-                    name: Spanning
-                  - entity: sensor.pace_bms_bms3_current
-                    name: Stroom
-                  - entity: sensor.pace_bms_bms3_power
-                    name: Vermogen
-                  - entity: sensor.pace_bms_bms3_environment_temperature
-                    name: Temperatuur
-                  - entity: sensor.pace_bms_bms3_min_cell_voltage
-                    name: Min celspanning
-                  - entity: sensor.pace_bms_bms3_max_cell_voltage
-                    name: Max celspanning
-                  - entity: sensor.pace_bms_bms3_max_cell_differential
-                    name: Cel delta
-                  - entity: sensor.pace_bms_bms3_full_capacity
-                    name: Capaciteit
-                  - entity: sensor.pace_bms_bms3_warning_status
-                    name: Warning
-                  - entity: sensor.pace_bms_bms3_fault_status
-                    name: Fault
-                  - entity: sensor.pace_bms_bms3_balancing_status
-                    name: Balancing
+              {{ states('sensor.pace_bms_bms3_system_status') }}
+            icon: |-
+              {% set soc = states('sensor.pace_bms_bms3_soc') | float(0) %}
+              {% if soc >= 95 %}
+                mdi:battery
+              {% elif soc >= 85 %}
+                mdi:battery-90
+              {% elif soc >= 75 %}
+                mdi:battery-80
+              {% elif soc >= 65 %}
+                mdi:battery-70
+              {% elif soc >= 55 %}
+                mdi:battery-60
+              {% elif soc >= 45 %}
+                mdi:battery-50
+              {% elif soc >= 35 %}
+                mdi:battery-40
+              {% elif soc >= 25 %}
+                mdi:battery-30
+              {% elif soc >= 15 %}
+                mdi:battery-20
+              {% elif soc >= 5 %}
+                mdi:battery-10
+              {% else %}
+                mdi:battery-alert
+              {% endif %}
+            badge_icon: >
+              {% set f = states('sensor.pace_bms_bms3_fault_status') %} {% if f
+              not in ['', 'unavailable', 'unknown', 'none'] %}mdi:alert{% endif
+              %}
+            badge_color: red
+            color: |-
+              {% set soc = states('sensor.pace_bms_bms3_soc') | float(0) %}
+              {% if soc >= 75 %}
+                green
+              {% elif soc >= 50 %}
+                amber
+              {% elif soc >= 30 %}
+                orange
+              {% else %}
+                red
+              {% endif %}
+            features_position: bottom
+            grid_options:
+              columns: 12
+              rows: 1
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Spanning
+              show_states: true
+              colorize_states: true
+            graph_span: 2h
+            apex_config:
+              chart:
+                height: 220
+                toolbar:
+                  show: false
+              yaxis:
+                forceNiceScale: true
+              legend:
+                show: false
+              tooltip:
+                shared: true
+                intersect: false
+                "y":
+                  formatter: function(value) { return value.toFixed(2) + ' V'; }
+              xaxis:
+                tooltip:
+                  enabled: false
+            series:
+              - entity: sensor.pace_bms_bms1_total_voltage
+                name: BMS 1
+                color: "#4CAF50"
+                stroke_width: 0
+                float_precision: 2
+                show:
+                  in_chart: false
+                  in_header: raw
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms1_total_voltage
+                name: BMS 1
+                color: "#4CAF50"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 2
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 1min
+                  fill: last
+              - entity: sensor.pace_bms_bms2_total_voltage
+                name: BMS 2
+                color: "#2196F3"
+                stroke_width: 0
+                float_precision: 2
+                show:
+                  in_chart: false
+                  in_header: raw
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms2_total_voltage
+                name: BMS 2
+                color: "#2196F3"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 2
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 1min
+                  fill: last
+              - entity: sensor.pace_bms_bms3_total_voltage
+                name: BMS 3
+                color: "#FF9800"
+                stroke_width: 0
+                float_precision: 2
+                show:
+                  in_chart: false
+                  in_header: raw
+                  name_in_header: true
+              - entity: sensor.pace_bms_bms3_total_voltage
+                name: BMS 3
+                color: "#FF9800"
+                stroke_width: 1
+                curve: smooth
+                float_precision: 2
+                show:
+                  in_header: false
+                group_by:
+                  func: avg
+                  duration: 1min
+                  fill: last
+      - type: grid
+        cards:
+          - type: entities
+            title: BMS 1 — Detail
+            show_header_toggle: false
+            entities:
+              - entity: sensor.pace_bms_bms1_soc
+                name: SOC
+                icon: mdi:battery-medium
+              - entity: sensor.pace_bms_bms1_total_voltage
+                name: Spanning
+              - entity: sensor.pace_bms_bms1_current
+                name: Stroom
+              - entity: sensor.pace_bms_bms1_power
+                name: Vermogen
+              - entity: sensor.pace_bms_bms1_environment_temperature
+                name: Temperatuur
+              - entity: sensor.pace_bms_bms1_min_cell_voltage
+                name: Min celspanning
+              - entity: sensor.pace_bms_bms1_max_cell_voltage
+                name: Max celspanning
+              - entity: sensor.pace_bms_bms1_max_cell_differential
+                name: Cel delta
+              - entity: sensor.pace_bms_bms1_full_capacity
+                name: Capaciteit
+              - entity: sensor.pace_bms_bms1_warning_status
+                name: Warning
+              - entity: sensor.pace_bms_bms1_fault_status
+                name: Fault
+              - entity: sensor.pace_bms_bms1_balancing_status
+                name: Balancing
+      - type: grid
+        cards:
+          - type: entities
+            title: BMS 2 — Detail
+            show_header_toggle: false
+            entities:
+              - entity: sensor.pace_bms_bms2_soc
+                name: SOC
+                icon: mdi:battery-medium
+              - entity: sensor.pace_bms_bms2_total_voltage
+                name: Spanning
+              - entity: sensor.pace_bms_bms2_current
+                name: Stroom
+              - entity: sensor.pace_bms_bms2_power
+                name: Vermogen
+              - entity: sensor.pace_bms_bms2_environment_temperature
+                name: Temperatuur
+              - entity: sensor.pace_bms_bms2_min_cell_voltage
+                name: Min celspanning
+              - entity: sensor.pace_bms_bms2_max_cell_voltage
+                name: Max celspanning
+              - entity: sensor.pace_bms_bms2_max_cell_differential
+                name: Cel delta
+              - entity: sensor.pace_bms_bms2_full_capacity
+                name: Capaciteit
+              - entity: sensor.pace_bms_bms2_warning_status
+                name: Warning
+              - entity: sensor.pace_bms_bms2_fault_status
+                name: Fault
+              - entity: sensor.pace_bms_bms2_balancing_status
+                name: Balancing
+      - type: grid
+        cards:
+          - type: entities
+            title: BMS 3 — Detail
+            show_header_toggle: false
+            entities:
+              - entity: sensor.pace_bms_bms3_soc
+                name: SOC
+                icon: mdi:battery-medium
+              - entity: sensor.pace_bms_bms3_total_voltage
+                name: Spanning
+              - entity: sensor.pace_bms_bms3_current
+                name: Stroom
+              - entity: sensor.pace_bms_bms3_power
+                name: Vermogen
+              - entity: sensor.pace_bms_bms3_environment_temperature
+                name: Temperatuur
+              - entity: sensor.pace_bms_bms3_min_cell_voltage
+                name: Min celspanning
+              - entity: sensor.pace_bms_bms3_max_cell_voltage
+                name: Max celspanning
+              - entity: sensor.pace_bms_bms3_max_cell_differential
+                name: Cel delta
+              - entity: sensor.pace_bms_bms3_full_capacity
+                name: Capaciteit
+              - entity: sensor.pace_bms_bms3_warning_status
+                name: Warning
+              - entity: sensor.pace_bms_bms3_fault_status
+                name: Fault
+              - entity: sensor.pace_bms_bms3_balancing_status
+                name: Balancing
+    cards: []
+    icon: mdi:battery-charging
+    dense_section_placement: false
