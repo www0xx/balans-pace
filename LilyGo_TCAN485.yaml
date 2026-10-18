@@ -108,12 +108,15 @@ sensor:
     pace_bms_id: master_bms
     total_voltage:
       name: "BMS1 Total Voltage"
+      on_value:
+        - lambda: id(bms1_last_seen) = millis();
     current:
       name: "BMS1 Current"
     power:
       name: "BMS1 Power"
     state_of_charge:
       name: "BMS1 SOC"
+      id: bms1_soc
     full_capacity:
       name: "BMS1 Full Capacity"
     min_cell_voltage:
@@ -182,6 +185,8 @@ sensor:
     pace_bms_id: slave_bms_3
     total_voltage:
       name: "BMS2 Total Voltage"
+      on_value:
+        - lambda: id(bms2_last_seen) = millis();
     current:
       name: "BMS2 Current"
     power:
@@ -256,6 +261,8 @@ sensor:
     pace_bms_id: slave_bms_4
     total_voltage:
       name: "BMS3 Total Voltage"
+      on_value:
+        - lambda: id(bms3_last_seen) = millis();
     current:
       name: "BMS3 Current"
     power:
@@ -459,3 +466,82 @@ text_sensor:
       }
       return {out};    
     
+
+# Status LED (WS2812 on GPIO4)
+#   blue blinking   = no Wi-Fi
+#   red blinking    = a battery has not reported for 60s (or no data yet after boot)
+#   green           = BMS1 SOC >= 50%
+#   yellow          = BMS1 SOC 20-50%
+#   orange          = BMS1 SOC < 20%
+globals:
+  - id: bms1_last_seen
+    type: uint32_t
+    initial_value: '0'
+  - id: bms2_last_seen
+    type: uint32_t
+    initial_value: '0'
+  - id: bms3_last_seen
+    type: uint32_t
+    initial_value: '0'
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    internal: true
+    pin: GPIO4
+    num_leds: 1
+    chipset: WS2812
+    rgb_order: GRB
+    default_transition_length: 0s
+    restore_mode: ALWAYS_OFF
+
+switch:
+  - platform: template
+    id: status_led_enabled
+    name: "Status LED"
+    icon: mdi:led-on
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          static uint32_t shown = 0xFFFFFFFF;  // last colour sent to the LED
+          static bool blink = false;
+          blink = !blink;
+          const uint32_t now = millis();
+          const uint32_t timeout = 60000;
+          const float soc = id(bms1_soc).state;
+
+          uint32_t colour;  // 0xRRGGBB, 0 = off
+          if (!id(status_led_enabled).state) {
+            colour = 0;
+          } else if (!wifi::global_wifi_component->is_connected()) {
+            colour = blink ? 0x0000FF : 0;
+          } else if (std::isnan(soc) ||
+                     now - id(bms1_last_seen) > timeout ||
+                     now - id(bms2_last_seen) > timeout ||
+                     now - id(bms3_last_seen) > timeout) {
+            colour = blink ? 0xFF0000 : 0;
+          } else if (soc >= 50) {
+            colour = 0x00FF00;
+          } else if (soc >= 20) {
+            colour = 0xFFA000;
+          } else {
+            colour = 0xFF3000;
+          }
+
+          if (colour == shown) return;
+          shown = colour;
+          auto call = id(status_led).make_call();
+          if (colour == 0) {
+            call.set_state(false);
+          } else {
+            call.set_state(true);
+            call.set_brightness(0.3);
+            call.set_rgb(((colour >> 16) & 0xFF) / 255.0f,
+                         ((colour >> 8) & 0xFF) / 255.0f,
+                         (colour & 0xFF) / 255.0f);
+          }
+          call.perform();
