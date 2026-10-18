@@ -52,7 +52,7 @@ https://www.cryptool.org/en/cto/openssl/
 4. Selecteer in het pop-upmenu linksboven de juiste COM-/serialpoort. Vaak is er maar één beschikbaar; in dat geval is de standaardkeuze meestal de juiste.
 5. Klik op Install. Dit duurt ongeveer 2 tot 5 minuten, omdat er nog verschillende packages gedownload moeten worden.
 
-Tip: tijdens het flashen zie je een gekleurde LED branden. Nadat het flashen klaar is, gaat de LED uit en blijft deze uit. De LED wordt in de huidige firmware niet gebruikt.
+Tip: tijdens het flashen zie je een gekleurde LED branden. Nadat het flashen klaar is, wordt de LED gebruikt als status-LED, zie [Status-LED](#status-led).
 
 ## Stap 4: LilyGO toevoegen aan Home Assistant
 1. Ga in Home Assistant naar Instellingen --> Integraties. Als het goed is, staat daar nu een ontdekte ESPHome-integratie met de naam pace_bms. Voeg deze toe met de standaardnaam.
@@ -80,6 +80,22 @@ Plug de kabel direct naast de al aangesloten gele ethernetkabel in:
 5. Voorzie de LilyGO nu van stroom via de USB-C-poort. Na een paar seconden zou de LilyGO verbinding moeten maken met je wifi-netwerk.
 
 De data zou nu binnen moeten komen op zowel de interne webserver van de LilyGO als in het dashboard dat je zojuist hebt aangemaakt. De interne webserver is bereikbaar via http://pace_bms.local/
+
+# Status-LED
+
+De RGB-LED op de LilyGO laat in één oogopslag zien of alles werkt:
+
+| LED | Betekenis |
+|---|---|
+| Blauw knipperend | Geen wifi-verbinding |
+| Rood knipperend | Eén of meer accu's hebben 60 seconden geen data gestuurd, of er is na het opstarten nog geen data binnen |
+| Groen | Laadtoestand (SOC) van de Master-accu is 50% of hoger |
+| Geel | SOC van de Master-accu tussen 20% en 50% |
+| Oranje | SOC van de Master-accu lager dan 20% |
+
+Knippert de LED rood, kijk dan bij [Troubleshooting](#troubleshooting).
+
+De LED kun je uitzetten in Home Assistant met de schakelaar **Status LED** van het pace_bms-apparaat. Deze instelling blijft bewaard na een herstart.
 
 # Troubleshooting
 
