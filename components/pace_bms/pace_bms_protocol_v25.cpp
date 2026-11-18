@@ -1,5 +1,8 @@
 
 #include "pace_bms_protocol_v25.h"
+#include <algorithm>
+#include <utility>
+#include <vector>
 
 // takes pointers to the "real" logging functions
 PaceBmsProtocolV25::PaceBmsProtocolV25(
@@ -778,6 +781,8 @@ bool PaceBmsProtocolV25::ProcessReadStatusInformationResponse(const uint8_t busI
 			logWarning("Response contains more cell warnings than are supported, results will be truncated");
 		}
 		int sanityCheck_cellsWithoutVoltageWarnings = 0;
+		// cell warnings are grouped per warning text ("<warning>: cells 1,2,3"), so the text stays short (HA states are limited to 255 chars)
+		std::vector<std::pair<std::string, std::string>> cellWarningGroups;
 		for (int i = 0; i < cellCount; i++)
 		{
 			uint8_t cw = ReadHexEncodedByte(response, byteOffset, quietMode);
@@ -792,7 +797,20 @@ bool PaceBmsProtocolV25::ProcessReadStatusInformationResponse(const uint8_t busI
 				continue;
 
 			// below/above limit
-			statusInformation.warningText.append(std::string("Cell ") + std::to_string(i + 1) + std::string(": ") + DecodeWarningValue(cw, "PaceBmsProtocolV25::ProcessReadStatusInformationResponse") + std::string("; "));
+			std::string cellWarning = DecodeWarningValue(cw, "PaceBmsProtocolV25::ProcessReadStatusInformationResponse");
+			auto group = std::find_if(cellWarningGroups.begin(), cellWarningGroups.end(), [&cellWarning](const std::pair<std::string, std::string>& g) { return g.first == cellWarning; });
+			if (group == cellWarningGroups.end())
+			{
+				cellWarningGroups.emplace_back(cellWarning, std::to_string(i + 1));
+			}
+			else
+			{
+				group->second.append("," + std::to_string(i + 1));
+			}
+		}
+		for (const auto& group : cellWarningGroups)
+		{
+			statusInformation.warningText.append(group.first + std::string(": cells ") + group.second + std::string("; "));
 		}
 
 		uint8_t tempCount = ReadHexEncodedByte(response, byteOffset, quietMode);
@@ -928,7 +946,8 @@ bool PaceBmsProtocolV25::ProcessReadStatusInformationResponse(const uint8_t busI
 		{
 			if ((balanceState & (1 << i)) != 0)
 			{
-				statusInformation.balancingText.append(std::string("Cell ") + std::to_string(i + 1) + " is balancing; ");
+				// list of cell numbers, e.g. "cells 1,4,16"
+				statusInformation.balancingText.append((statusInformation.balancingText.empty() ? std::string("cells ") : std::string(",")) + std::to_string(i + 1));
 			}
 		}
 
